@@ -290,3 +290,64 @@ export type DbOverview = {
   };
   workspaces: DbWorkspaceSummary[];
 };
+
+export type ControlCanvasSummary = {
+  id: string;
+  name: string;
+  project_id: string;
+  created_at: string | null;
+  node_count: number;
+  edge_count: number;
+  frame_count: number;
+};
+
+export type ControlProjectSummary = {
+  id: string;
+  name: string;
+  workspace_id: string | null;
+  workspace_name: string | null;
+  created_by: string;
+  created_by_username?: string | null;
+  created_at: string | null;
+  message_count: number;
+  upload_count: number;
+  canvas_count: number;
+  canvases: ControlCanvasSummary[];
+  uploads: UploadRecord[];
+};
+
+export type ControlWorkspaceSummary = {
+  id: string;
+  name: string;
+  role: string;
+  project_count: number;
+  created_at: string | null;
+};
+
+export type ControlUserRow = {
+  user: UserRecord;
+  email: string | null;
+  owned_workspaces: ControlWorkspaceSummary[];
+  member_workspaces: ControlWorkspaceSummary[];
+  projects_created: ControlProjectSummary[];
+  uploads: UploadRecord[];
+  totals: {
+    projects_created: number;
+    canvases: number;
+    uploads: number;
+    messages_in_projects: number;
+  };
+};
+
+export type ControlOverview = {
+  generated_at: string;
+  totals: {
+    users: number;
+    workspaces: number;
+    projects: number;
+    canvases: number;
+    uploads: number;
+    messages: number;
+  };
+  users: ControlUserRow[];
+};

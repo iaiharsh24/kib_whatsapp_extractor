@@ -93,3 +93,21 @@ export function formatWhen(value?: string | null): string {
     minute: "2-digit",
   });
 }
+
+export async function downloadAuthenticated(path: string, filename: string): Promise<void> {
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(path, { headers });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(parseApiError(detail, res.status));
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}

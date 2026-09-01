@@ -28,6 +28,7 @@ const ACTION_LABELS: Record<string, string> = {
   "admin.user.delete": "removed user",
   "admin.signup_code.create": "created signup code",
   "admin.signup_code.revoke": "revoked signup code",
+  "admin.user.export": "exported user backup",
 };
 
 export function describeActivity(log: ActivityLogRecord): { who: string; what: string } {

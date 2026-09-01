@@ -249,13 +249,13 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           ) : null}
           {user?.is_super_admin ? (
             <Link
-              href="/database"
-              title="Database"
+              href="/control"
+              title="Control center"
               className={`rounded-md text-sm ${
                 collapsed ? "px-0 py-2 text-center" : "px-3 py-2"
-              } ${(pathname ?? "").startsWith("/database") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
+              } ${(pathname ?? "").startsWith("/control") || (pathname ?? "").startsWith("/database") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
             >
-              {collapsed ? "D" : "Database"}
+              {collapsed ? "C" : "Control"}
             </Link>
           ) : null}
         </nav>

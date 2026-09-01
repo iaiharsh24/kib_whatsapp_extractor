@@ -8,6 +8,7 @@ from db.models import ActivityLog, User
 SUPER_ADMIN_ONLY_ACTIONS = frozenset(
     {
         "db.snapshot.create",
+        "admin.user.export",
     }
 )
 

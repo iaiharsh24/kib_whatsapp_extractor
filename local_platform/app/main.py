@@ -6,7 +6,7 @@ import os
 import secrets
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import unquote
 
@@ -42,6 +42,7 @@ from app.auth import (
     SUPER_ADMIN_EMAILS,
     visible_users_for_admin,
 )
+from app.admin_control import build_control_overview, export_user_backup_json
 from app.backups import run_backup, serialize_snapshot, start_backup_scheduler
 from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
 from app.llm import build_prompt, complete
@@ -302,6 +303,8 @@ def require_workspace_member(workspace_id: str, user: User, db: Session) -> Work
     workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    if is_super_admin(user):
+        return workspace
     member = (
         db.query(WorkspaceMember)
         .filter(WorkspaceMember.workspace_id == workspace_id, WorkspaceMember.user_id == user.id)
@@ -638,6 +641,43 @@ async def put_preference(
 
 @app.get("/api/workspaces")
 async def list_workspaces(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if is_super_admin(user):
+        workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
+        ws_ids = [workspace.id for workspace in workspaces]
+        counts_by_ws: dict[str, dict] = {}
+        if ws_ids:
+            project_counts = dict(
+                db.query(Project.workspace_id, func.count(Project.id))
+                .filter(Project.workspace_id.in_(ws_ids))
+                .group_by(Project.workspace_id)
+                .all()
+            )
+            upload_counts = dict(
+                db.query(Upload.workspace_id, func.count(Upload.id))
+                .filter(Upload.workspace_id.in_(ws_ids))
+                .group_by(Upload.workspace_id)
+                .all()
+            )
+            message_counts = dict(
+                db.query(Message.workspace_id, func.count(Message.id))
+                .filter(Message.workspace_id.in_(ws_ids))
+                .group_by(Message.workspace_id)
+                .all()
+            )
+            for wid in ws_ids:
+                counts_by_ws[wid] = {
+                    "projects": project_counts.get(wid, 0),
+                    "uploads": upload_counts.get(wid, 0),
+                    "messages": message_counts.get(wid, 0),
+                }
+        return [
+            serialize_workspace(
+                workspace,
+                role="owner" if workspace.owner_id == user.id else "member",
+                counts=counts_by_ws.get(workspace.id),
+            )
+            for workspace in workspaces
+        ]
     rows = (
         db.query(Workspace, WorkspaceMember)
         .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
@@ -1668,6 +1708,8 @@ def require_project_access(project_id: str, user: User, db: Session) -> Project:
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if is_super_admin(user):
+        return project
     if project.workspace_id:
         require_workspace_member(project.workspace_id, user, db)
     return project
@@ -2025,7 +2067,47 @@ async def list_activity_logs(
     }
 
 
-# ---------- Super-admin: Database overview + snapshots ----------
+# ---------- Super-admin: Control center + database snapshots ----------
+
+
+@app.get("/api/admin/control/overview")
+async def control_overview(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """User-centric view of every account, project, canvas, and upload."""
+    return build_control_overview(db, admin)
+
+
+@app.get("/api/admin/control/users/{user_id}/export")
+async def export_user_control_backup(
+    user_id: str,
+    include_messages: bool = Query(False),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    from fastapi.responses import Response as _Response
+
+    try:
+        payload = export_user_backup_json(db, user_id, include_messages=include_messages)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="User not found")
+    user = db.query(User).filter(User.id == user_id).first()
+    label = (user.email or user.username or user_id).replace("@", "_at_")
+    filename = f"backup_{label}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+    log_activity(
+        db,
+        admin,
+        "admin.user.export",
+        resource_type="user",
+        resource_id=user_id,
+        resource_name=user.email or user.username if user else user_id,
+        details={"include_messages": include_messages},
+    )
+    db.commit()
+    return _Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 def _serialize_upload_for_db(upload: Upload, uploader_name: str | None) -> dict:
     return {
