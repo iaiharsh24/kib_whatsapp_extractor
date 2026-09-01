@@ -189,6 +189,28 @@ chmod +x deploy/upgrade-postgres.sh
 docker compose exec -T postgres pg_dump -U whatsapp whatsapp | gzip > db-$(date +%F).sql.gz
 ```
 
+## 7b. Schema migrations (Alembic)
+
+Schema changes are owned by Alembic (`local_platform/alembic/`). On every boot the
+API runs `alembic upgrade head`, so pending migrations apply automatically — there
+is no longer any hand-rolled `ALTER TABLE` running on every restart. Existing
+databases were stamped to the `0001_baseline` revision once on first boot after
+the switch, so they skip the baseline and only apply newer revisions.
+
+To add a schema change (from `local_platform/`):
+
+```bash
+# autogenerate a revision from model changes
+alembic revision --autogenerate -m "add foo column to messages"
+# edit the generated file under alembic/versions/, then
+alembic upgrade head      # apply locally
+git add local_platform/alembic/versions/   # commit it
+# on the VPS, ./deploy/upgrade-postgres.sh runs upgrade head on boot
+```
+
+Never edit a revision that has already been deployed — add a new one instead.
+
+
 Enable **daily** backups in hPanel: VPS → Backups → Backup schedule → Daily.
 
 ## 7a. Data safety

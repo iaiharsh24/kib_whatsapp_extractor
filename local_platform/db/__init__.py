@@ -1,9 +1,11 @@
-"""Database session, schema create, and default admin seed."""
+"""Database session, schema migrations (Alembic), and default admin seed."""
 import os
+from pathlib import Path
+
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 
-from .models import Base, Message, Project, ProjectCanvas, Upload, User, Workspace, WorkspaceMember
+from .models import Base, Project, ProjectCanvas, User, Workspace, WorkspaceMember
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.getenv(
@@ -70,221 +72,50 @@ def get_db():
         db.close()
 
 
-def _table_columns(conn, table_name: str) -> set[str]:
-    return {column["name"] for column in inspect(conn).get_columns(table_name)}
+def _run_alembic_on_startup() -> None:
+    """Bring the database schema up to the latest Alembic revision.
 
+    - Existing pre-Alembic databases (tables present, no alembic_version row) are
+      stamped to the baseline revision once. They are already at the current
+      schema because the legacy boot migrations ran on them before; stamping
+      means we never re-run those scans/UPDATEs on every restart.
+    - Fresh empty databases get `upgrade head`, which runs the baseline revision
+      (Base.metadata.create_all) and any newer revisions.
+    - Already-versioned databases get `upgrade head` to apply pending revisions.
+    """
+    from alembic import command
+    from alembic.config import Config
 
-def _ensure_columns():
-    inspector = inspect(engine)
-    existing_tables = set(inspector.get_table_names())
-    if not existing_tables:
-        return
+    cfg = Config(str(Path(_PROJECT_ROOT) / "local_platform" / "alembic.ini"))
+    # script_location in alembic.ini is relative to cwd, which differs between the
+    # Docker WORKDIR (/app/local_platform) and local dev. Pin it to the absolute path.
+    cfg.set_main_option("script_location", str(Path(_PROJECT_ROOT) / "local_platform" / "alembic"))
+    # env.py reads the app engine directly; this URL is only used for offline mode.
+    cfg.set_main_option(
+        "sqlalchemy.url", DATABASE_URL or f"sqlite+pysqlite:///{DB_PATH}"
+    )
 
-    with engine.begin() as conn:
-        if "messages" in existing_tables:
-            names = _table_columns(conn, "messages")
-            if "link_preview" not in names:
-                conn.execute(text("ALTER TABLE messages ADD COLUMN link_preview JSON"))
-            if "workspace_id" not in names:
-                conn.execute(text("ALTER TABLE messages ADD COLUMN workspace_id VARCHAR"))
-            if "project_id" not in names:
-                conn.execute(text("ALTER TABLE messages ADD COLUMN project_id VARCHAR"))
+    insp = inspect(engine)
+    existing_tables = set(insp.get_table_names())
+    has_alembic_row = False
+    if "alembic_version" in existing_tables:
+        with engine.connect() as conn:
+            has_alembic_row = conn.execute(text("SELECT count(*) FROM alembic_version")).scalar() > 0
 
-        if "project_canvas" in existing_tables:
-            canvas_names = _table_columns(conn, "project_canvas")
-            if "viewport" not in canvas_names:
-                conn.execute(text("ALTER TABLE project_canvas ADD COLUMN viewport JSON"))
-            if "name" not in canvas_names:
-                conn.execute(text("ALTER TABLE project_canvas ADD COLUMN name VARCHAR DEFAULT 'Main canvas'"))
-            if "created_at" not in canvas_names:
-                conn.execute(text("ALTER TABLE project_canvas ADD COLUMN created_at DATETIME"))
-
-        if "users" in existing_tables:
-            user_names = _table_columns(conn, "users")
-            if "email" not in user_names:
-                conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR"))
-
-        if "uploads" in existing_tables:
-            upload_names = _table_columns(conn, "uploads")
-            if "workspace_id" not in upload_names:
-                conn.execute(text("ALTER TABLE uploads ADD COLUMN workspace_id VARCHAR"))
-            if "duplicate_count" not in upload_names:
-                conn.execute(text("ALTER TABLE uploads ADD COLUMN duplicate_count INTEGER DEFAULT 0"))
-            if "project_id" not in upload_names:
-                conn.execute(text("ALTER TABLE uploads ADD COLUMN project_id VARCHAR"))
-
-        if "projects" in existing_tables:
-            project_names = _table_columns(conn, "projects")
-            if "workspace_id" not in project_names:
-                conn.execute(text("ALTER TABLE projects ADD COLUMN workspace_id VARCHAR"))
-
-    _migrate_project_canvas_multi()
-    _migrate_message_upload_dedupe()
-    _migrate_project_data()
-
-
-def _project_canvas_has_unique_project_id(conn) -> bool:
-    if DB_BACKEND == "sqlite":
-        row = conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='project_canvas'")).fetchone()
-        if not row or not row[0]:
-            return False
-        ddl = str(row[0])
-        return "UNIQUE (project_id)" in ddl or "UNIQUE(project_id)" in ddl
-
-    uniques = inspect(conn).get_unique_constraints("project_canvas")
-    return any(set(item.get("column_names") or []) == {"project_id"} for item in uniques)
-
-
-def _migrate_project_canvas_multi():
-    """Allow multiple canvases per project (drop legacy UNIQUE(project_id))."""
-    inspector = inspect(engine)
-    if "project_canvas" not in inspector.get_table_names():
-        return
-
-    with engine.begin() as conn:
-        if not _project_canvas_has_unique_project_id(conn):
-            return
-
-        print("[db] Migrating project_canvas: removing UNIQUE(project_id) for multi-canvas support")
-        if DB_BACKEND == "sqlite":
-            conn.execute(text("PRAGMA foreign_keys=OFF"))
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE project_canvas_new (
-                        id VARCHAR NOT NULL PRIMARY KEY,
-                        project_id VARCHAR NOT NULL,
-                        name VARCHAR NOT NULL DEFAULT 'Main canvas',
-                        nodes JSON NOT NULL,
-                        edges JSON NOT NULL,
-                        frames JSON NOT NULL,
-                        viewport JSON,
-                        created_at DATETIME,
-                        FOREIGN KEY(project_id) REFERENCES projects (id)
-                    )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO project_canvas_new (id, project_id, name, nodes, edges, frames, viewport, created_at)
-                    SELECT id, project_id, COALESCE(name, 'Main canvas'), nodes, edges, frames, viewport, created_at
-                    FROM project_canvas
-                    """
-                )
-            )
-            conn.execute(text("DROP TABLE project_canvas"))
-            conn.execute(text("ALTER TABLE project_canvas_new RENAME TO project_canvas"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_project_canvas_project_id ON project_canvas (project_id)"))
-            conn.execute(text("PRAGMA foreign_keys=ON"))
-        else:
-            for item in inspect(conn).get_unique_constraints("project_canvas"):
-                if set(item.get("column_names") or []) == {"project_id"}:
-                    name = item.get("name")
-                    if name:
-                        conn.execute(text(f'ALTER TABLE project_canvas DROP CONSTRAINT IF EXISTS "{name}"'))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_project_canvas_project_id ON project_canvas (project_id)"))
-
-
-def _migrate_project_data():
-    """Backfill project_id on uploads/messages and attach orphan uploads to a project."""
-    db = SessionLocal()
-    try:
-        for upload in db.query(Upload).filter(Upload.project_id.isnot(None)).all():
-            db.query(Message).filter(Message.upload_id == upload.id, Message.project_id.is_(None)).update(
-                {Message.project_id: upload.project_id}, synchronize_session=False
-            )
-
-        for workspace in db.query(Workspace).all():
-            default_project = (
-                db.query(Project)
-                .filter(Project.workspace_id == workspace.id)
-                .order_by(Project.created_at.asc())
-                .first()
-            )
-            if not default_project:
-                owner = db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == workspace.id).first()
-                if not owner:
-                    continue
-                default_project = Project(
-                    name="Imported media",
-                    created_by=owner.user_id,
-                    workspace_id=workspace.id,
-                )
-                db.add(default_project)
-                db.flush()
-                db.add(ProjectCanvas(project_id=default_project.id, name="Main canvas", nodes=[], edges=[], frames=[]))
-
-            db.query(Upload).filter(
-                Upload.workspace_id == workspace.id,
-                Upload.project_id.is_(None),
-            ).update({Upload.project_id: default_project.id}, synchronize_session=False)
-            db.query(Message).filter(
-                Message.workspace_id == workspace.id,
-                Message.project_id.is_(None),
-            ).update({Message.project_id: default_project.id}, synchronize_session=False)
-
-        db.commit()
-    finally:
-        db.close()
-
-
-def _migrate_message_upload_dedupe():
-    """Dedupe messages per upload (not per project) so every export file is fully ingested."""
-    inspector = inspect(engine)
-    if "messages" not in inspector.get_table_names():
-        return
-
-    indexes = {item["name"]: item for item in inspector.get_indexes("messages")}
-    uniques = {item["name"]: item for item in inspector.get_unique_constraints("messages")}
-    all_meta = (*indexes.values(), *uniques.values())
-
-    has_upload_hash = any(set(item.get("column_names") or []) == {"upload_id", "content_hash"} for item in all_meta)
-    has_project_hash = any(set(item.get("column_names") or []) == {"project_id", "content_hash"} for item in all_meta)
-
-    if has_upload_hash and not has_project_hash:
-        return
-
-    print("[db] Migrating messages: dedupe by upload_id + content_hash (import all messages per export)")
-    with engine.begin() as conn:
-        if DB_BACKEND == "sqlite":
-            conn.execute(text("DROP INDEX IF EXISTS uq_message_project_hash"))
-            conn.execute(text("DROP INDEX IF EXISTS uq_message_workspace_hash"))
-            conn.execute(text("DROP INDEX IF EXISTS uq_message_upload_hash"))
-            for name, meta in indexes.items():
-                cols = set(meta.get("column_names") or [])
-                if meta.get("unique") and cols in (
-                    {"project_id", "content_hash"},
-                    {"workspace_id", "content_hash"},
-                    {"content_hash"},
-                ):
-                    conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
-            conn.execute(
-                text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_upload_hash "
-                    "ON messages (upload_id, content_hash)"
-                )
-            )
-        else:
-            conn.execute(text("ALTER TABLE messages DROP CONSTRAINT IF EXISTS uq_message_project_hash"))
-            conn.execute(text("ALTER TABLE messages DROP CONSTRAINT IF EXISTS uq_message_workspace_hash"))
-            conn.execute(text("DROP INDEX IF EXISTS uq_message_project_hash"))
-            conn.execute(text("DROP INDEX IF EXISTS uq_message_workspace_hash"))
-            conn.execute(
-                text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_upload_hash "
-                    "ON messages (upload_id, content_hash)"
-                )
-            )
+    if not has_alembic_row and "users" in existing_tables:
+        # Pre-Alembic database already at the current schema: stamp, don't recreate.
+        print("[db] stamping existing database to Alembic baseline (0001_baseline)")
+        command.stamp(cfg, "0001_baseline")
+    else:
+        command.upgrade(cfg, "head")
 
 
 def create_tables():
+    """Create/upgrade the schema via Alembic, then report the backend location."""
     wait_for_database()
-    Base.metadata.create_all(bind=engine)
-    _ensure_columns()
+    _run_alembic_on_startup()
     location = DATABASE_URL.split("@")[-1] if DATABASE_URL else DB_PATH
-    print(f"Tables created ({DB_BACKEND}) at: {location}")
+    print(f"Schema ready ({DB_BACKEND}) at: {location}")
 
 
 def seed_local_defaults():
@@ -337,24 +168,5 @@ def seed_local_defaults():
                 db.flush()
                 db.add(ProjectCanvas(project_id=project.id, name="Main canvas", nodes=[], edges=[], frames=[]))
         db.commit()
-        _migrate_legacy_workspace_ids(db)
     finally:
         db.close()
-
-
-def _migrate_legacy_workspace_ids(db):
-    """Backfill workspace_id on rows created before multi-workspace support."""
-    workspace = db.query(Workspace).order_by(Workspace.created_at.asc()).first()
-    if not workspace:
-        return
-
-    db.query(Project).filter(Project.workspace_id.is_(None)).update(
-        {Project.workspace_id: workspace.id}, synchronize_session=False
-    )
-    db.query(Upload).filter(Upload.workspace_id.is_(None)).update(
-        {Upload.workspace_id: workspace.id}, synchronize_session=False
-    )
-    db.query(Message).filter(Message.workspace_id.is_(None)).update(
-        {Message.workspace_id: workspace.id}, synchronize_session=False
-    )
-    db.commit()
