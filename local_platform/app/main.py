@@ -45,6 +45,7 @@ from db.models import (
     Workspace,
     WorkspaceInvite,
     WorkspaceMember,
+    SignupCode,
 )
 
 PROJECT_ROOT = os.path.dirname(_LOCAL_PLATFORM)
@@ -67,6 +68,20 @@ app.add_middleware(
 class LoginBody(BaseModel):
     email: str
     password: str
+
+
+class SignupBody(BaseModel):
+    code: str
+    email: str
+    password: str
+    username: Optional[str] = None
+
+
+class SignupCodeCreate(BaseModel):
+    note: Optional[str] = None
+    max_uses: int = 1
+    workspace_id: Optional[str] = None
+    workspace_role: str = "member"
 
 
 class UserCreate(BaseModel):
@@ -268,6 +283,47 @@ def unique_username(db: Session, base: str) -> str:
     return candidate
 
 
+def normalize_signup_code(raw: str) -> str:
+    return (raw or "").strip().upper().replace("-", "").replace(" ", "")
+
+
+def generate_signup_code(db: Session) -> str:
+    while True:
+        candidate = secrets.token_hex(4).upper()
+        if not db.query(SignupCode).filter(SignupCode.code == candidate).first():
+            return candidate
+
+
+def get_signup_code(db: Session, raw_code: str) -> SignupCode | None:
+    normalized = normalize_signup_code(raw_code)
+    if not normalized:
+        return None
+    return db.query(SignupCode).filter(SignupCode.code == normalized).first()
+
+
+def signup_code_is_valid(signup_code: SignupCode | None) -> bool:
+    if not signup_code or signup_code.revoked:
+        return False
+    max_uses = signup_code.max_uses or 1
+    return (signup_code.used_count or 0) < max_uses
+
+
+def serialize_signup_code(signup_code: SignupCode) -> dict:
+    return {
+        "id": signup_code.id,
+        "code": signup_code.code,
+        "note": signup_code.note,
+        "max_uses": signup_code.max_uses or 1,
+        "used_count": signup_code.used_count or 0,
+        "revoked": bool(signup_code.revoked),
+        "workspace_id": signup_code.workspace_id,
+        "workspace_role": signup_code.workspace_role,
+        "created_by": signup_code.created_by,
+        "created_at": signup_code.created_at.isoformat() if signup_code.created_at else None,
+        "link": f"/signup/{signup_code.code}",
+    }
+
+
 def hydrate_canvas_nodes(nodes: list, messages: dict[str, dict]) -> list:
     hydrated = []
     for node in nodes or []:
@@ -391,6 +447,72 @@ async def login(body: LoginBody, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     ensure_personal_workspace(db, user)
     db.commit()
+    return {"token": make_token(user), "user": serialize_user(user)}
+
+
+@app.get("/api/auth/signup/{code}")
+async def preview_signup_code(code: str, db: Session = Depends(get_db)):
+    signup_code = get_signup_code(db, code)
+    if not signup_code_is_valid(signup_code):
+        raise HTTPException(status_code=404, detail="This signup code is invalid or has been used")
+    workspace_name = None
+    if signup_code.workspace_id:
+        workspace = db.query(Workspace).filter(Workspace.id == signup_code.workspace_id).first()
+        workspace_name = workspace.name if workspace else None
+    return {
+        "code": signup_code.code,
+        "note": signup_code.note,
+        "workspace_name": workspace_name,
+        "uses_remaining": max(0, (signup_code.max_uses or 1) - (signup_code.used_count or 0)),
+    }
+
+
+@app.post("/api/auth/signup", status_code=201)
+async def signup(body: SignupBody, db: Session = Depends(get_db)):
+    signup_code = get_signup_code(db, body.code)
+    if not signup_code_is_valid(signup_code):
+        raise HTTPException(status_code=400, detail="This signup code is invalid or has been used")
+
+    email = (body.email or "").strip().lower()
+    password = (body.password or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="An account with this email already exists. Sign in instead.")
+
+    username = unique_username(db, body.username or email.split("@")[0])
+    user = User(
+        username=username,
+        email=email,
+        password_hash=hash_password(password),
+        role="member",
+    )
+    db.add(user)
+    db.flush()
+    ensure_personal_workspace(db, user)
+
+    if signup_code.workspace_id:
+        workspace = db.query(Workspace).filter(Workspace.id == signup_code.workspace_id).first()
+        if workspace:
+            member = (
+                db.query(WorkspaceMember)
+                .filter(WorkspaceMember.workspace_id == workspace.id, WorkspaceMember.user_id == user.id)
+                .first()
+            )
+            if not member:
+                db.add(
+                    WorkspaceMember(
+                        workspace_id=workspace.id,
+                        user_id=user.id,
+                        role=signup_code.workspace_role or "member",
+                    )
+                )
+
+    signup_code.used_count = (signup_code.used_count or 0) + 1
+    db.commit()
+    db.refresh(user)
     return {"token": make_token(user), "user": serialize_user(user)}
 
 
@@ -1461,6 +1583,51 @@ async def add_user(body: UserCreate, db: Session = Depends(get_db), admin: User 
     data = serialize_user(user)
     data["temporary_password"] = temp
     return data
+
+
+@app.get("/api/admin/signup-codes")
+async def list_signup_codes(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    rows = db.query(SignupCode).order_by(SignupCode.created_at.desc()).all()
+    return [serialize_signup_code(row) for row in rows]
+
+
+@app.post("/api/admin/signup-codes", status_code=201)
+async def create_signup_code(
+    body: SignupCodeCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    max_uses = body.max_uses if body.max_uses and body.max_uses > 0 else 1
+    if body.workspace_id:
+        require_workspace_member(body.workspace_id, admin, db)
+    if body.workspace_role not in {"owner", "member"}:
+        raise HTTPException(status_code=400, detail="Workspace role must be owner or member")
+    signup_code = SignupCode(
+        code=generate_signup_code(db),
+        created_by=admin.id,
+        note=(body.note or "").strip() or None,
+        max_uses=max_uses,
+        workspace_id=body.workspace_id,
+        workspace_role=body.workspace_role,
+    )
+    db.add(signup_code)
+    db.commit()
+    db.refresh(signup_code)
+    return serialize_signup_code(signup_code)
+
+
+@app.delete("/api/admin/signup-codes/{code_id}")
+async def revoke_signup_code(
+    code_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    signup_code = db.query(SignupCode).filter(SignupCode.id == code_id).first()
+    if not signup_code:
+        raise HTTPException(status_code=404, detail="Signup code not found")
+    signup_code.revoked = 1
+    db.commit()
+    return {"revoked": True, "id": code_id}
 
 
 @app.post("/api/admin/users/{user_id}/reset-password")

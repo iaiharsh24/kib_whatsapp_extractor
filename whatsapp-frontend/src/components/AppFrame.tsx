@@ -11,20 +11,22 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const path = pathname ?? "";
   const isLogin = path === "/login";
+  const isSignup = path === "/signup" || path.startsWith("/signup/");
   const isInvite = path.startsWith("/invite/");
+  const isPublicAuth = isLogin || isSignup || isInvite;
 
   useEffect(() => {
     const token = getToken();
-    if (!isLogin && !isInvite && !token) {
+    if (!isPublicAuth && !token) {
       router.replace("/login");
       return;
     }
-    if (isLogin && token) {
+    if ((isLogin || isSignup) && token) {
       router.replace("/");
       return;
     }
     setReady(true);
-  }, [isInvite, isLogin, pathname, router]);
+  }, [isPublicAuth, isLogin, isSignup, pathname, router]);
 
   if (!ready) {
     return (
@@ -34,7 +36,7 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (isLogin || isInvite) {
+  if (isLogin || isSignup || isInvite) {
     return <>{children}</>;
   }
 

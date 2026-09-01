@@ -43,6 +43,27 @@ export type InviteRecord = {
   link: string;
 };
 
+export type SignupPreview = {
+  code: string;
+  note?: string | null;
+  workspace_name?: string | null;
+  uses_remaining: number;
+};
+
+export type SignupCodeRecord = {
+  id: string;
+  code: string;
+  note?: string | null;
+  max_uses: number;
+  used_count: number;
+  revoked: boolean;
+  workspace_id?: string | null;
+  workspace_role: WorkspaceRole;
+  created_by: string;
+  created_at: string | null;
+  link: string;
+};
+
 export type InvitePreview = {
   workspace_name: string;
   invited_by: string;

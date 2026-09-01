@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, setSession } from "@/lib/api";
@@ -64,6 +65,12 @@ export default function LoginPage() {
         >
           {busy ? "Signing in..." : "Sign in"}
         </button>
+        <p className="mt-4 text-center text-sm text-zinc-600">
+          Have a signup code?{" "}
+          <Link href="/signup" className="font-medium text-emerald-800 underline">
+            Create your account
+          </Link>
+        </p>
       </form>
     </div>
   );

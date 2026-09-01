@@ -74,6 +74,24 @@ class WorkspaceInvite(Base):
     creator = relationship("User")
 
 
+class SignupCode(Base):
+    __tablename__ = "signup_codes"
+
+    id = Column(String, primary_key=True, default=lambda: new_id("signup"))
+    code = Column(String, unique=True, nullable=False, index=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    note = Column(String, nullable=True)
+    max_uses = Column(Integer, default=1)
+    used_count = Column(Integer, default=0)
+    revoked = Column(Integer, default=0)
+    workspace_id = Column(String, ForeignKey("workspaces.id"), nullable=True, index=True)
+    workspace_role = Column(String, nullable=False, default="member")
+
+    creator = relationship("User", foreign_keys=[created_by])
+    workspace = relationship("Workspace")
+
+
 class Tag(Base):
     __tablename__ = "tags"
 
