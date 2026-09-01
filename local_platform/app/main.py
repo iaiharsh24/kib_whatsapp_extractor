@@ -61,6 +61,7 @@ from db import DB_BACKEND, DB_PATH, DATABASE_URL, create_tables, get_db, seed_lo
 from db.workspaces import ensure_personal_workspace
 from db.models import (
     ActivityLog,
+    BackupEvent,
     CanvasVersion,
     DbSnapshot,
     Message,
@@ -1349,8 +1350,15 @@ async def library(
     if chat:
         query = query.filter(Message.chat_name == chat)
     if site:
-        site_col = func.json_extract(Message.link_preview, "$.site")
-        domain_col = func.json_extract(Message.link_preview, "$.domain")
+        # Cross-dialect JSON text extraction. `func.json_extract` is SQLite-only
+        # and throws on Postgres ("function json_extract does not exist"); `->>`
+        # is the Postgres text-extraction operator. Both return unquoted text.
+        if DB_BACKEND == "sqlite":
+            site_col = func.json_extract(Message.link_preview, "$.site")
+            domain_col = func.json_extract(Message.link_preview, "$.domain")
+        else:
+            site_col = Message.link_preview.op("->>")("site")
+            domain_col = Message.link_preview.op("->>")("domain")
         query = query.filter(or_(site_col == site, domain_col == site))
     if q:
         like = f"%{q}%"
@@ -2265,6 +2273,40 @@ async def create_db_snapshot(
 @app.get("/api/admin/db/backup-status")
 async def get_backup_status(admin: User = Depends(require_super_admin)):
     return backup_status()
+
+
+@app.get("/api/admin/db/backup-events")
+async def list_backup_events(
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    """Durable history of backup attempts (successes AND failures).
+
+    Failures don't create a DbSnapshot, so without this table a failed backup
+    left no trace. This endpoint is the audit trail the control center reads.
+    """
+    rows = (
+        db.query(BackupEvent)
+        .order_by(BackupEvent.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "outcome": row.outcome,
+                "kind": row.kind,
+                "file_name": row.file_name,
+                "size_bytes": row.size_bytes,
+                "error": row.error,
+                "consecutive_failures": row.consecutive_failures,
+            }
+            for row in rows
+        ]
+    }
 
 
 @app.get("/api/admin/db/snapshots/{snapshot_id}/download")

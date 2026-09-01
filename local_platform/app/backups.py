@@ -25,6 +25,7 @@ from sqlalchemy import func
 
 from db import DB_BACKEND, DB_PATH, DATABASE_URL, SessionLocal, engine
 from db.models import (
+    BackupEvent,
     DbSnapshot,
     Message,
     Project,
@@ -45,6 +46,12 @@ DATA_DIR = os.getenv("WA_DATA_DIR", os.path.join(_PROJECT_ROOT, "..", "local_dat
 MIRROR_FILES = (os.getenv("WA_BACKUP_MIRROR_FILES", "1") or "1").lower() not in {"0", "false", "no"}
 MIRRORED_DIRS = ("uploads", "extracted")
 
+# Optional alert webhook (Slack/Discord/healthchecks.io/Teams all accept a POST).
+# No-op when unset, so this is safe by default. On failure (and on first success
+# after failures) we POST a small JSON payload so silent backup death can't recur.
+ALERT_WEBHOOK_URL = (os.getenv("WA_BACKUP_ALERT_WEBHOOK") or "").strip()
+ALERT_MIN_FAILURES = int(os.getenv("WA_BACKUP_ALERT_MIN_FAILURES", "1"))
+
 # A destructive request reuses a snapshot this fresh instead of taking a new one.
 PRE_DELETE_MAX_AGE_SECONDS = int(os.getenv("WA_PRE_DELETE_SNAPSHOT_MAX_AGE", "120"))
 REQUIRE_BACKUP_BEFORE_DELETE = (
@@ -55,13 +62,9 @@ _scheduler_started = False
 _scheduler_lock = threading.Lock()
 _backup_lock = threading.RLock()
 
-_status: dict = {
-    "last_success_at": None,
-    "last_success_file": None,
-    "last_error": None,
-    "last_error_at": None,
-    "consecutive_failures": 0,
-}
+# In-memory mirror of the latest BackupEvent, so /health stays fast and still
+# works before the first event is persisted. The DB table is the source of truth.
+_latest_event: dict | None = None
 
 
 class BackupError(RuntimeError):
@@ -84,38 +87,121 @@ def _files_dir() -> Path:
     return path
 
 
-def backup_status() -> dict:
-    """Snapshot-system health, surfaced by /health and the control center."""
-    with _backup_lock:
-        status = dict(_status)
-    last = status.get("last_success_at")
-    age = None
-    if last:
-        age = int((_utcnow() - datetime.fromisoformat(last)).total_seconds())
-    # Two missed cycles means something is wrong.
-    stale = age is None or age > BACKUP_INTERVAL_SECONDS * 2 + 300
-    status["last_success_age_seconds"] = age
-    status["interval_seconds"] = BACKUP_INTERVAL_SECONDS
-    status["directory"] = BACKUP_DIR
-    status["healthy"] = bool(last) and not stale and status["consecutive_failures"] == 0
-    return status
-
-
-def _record_success(file_name: str) -> None:
-    with _backup_lock:
-        _status.update(
-            last_success_at=_utcnow().isoformat(),
-            last_success_file=file_name,
-            last_error=None,
-            consecutive_failures=0,
+def _persist_event(
+    outcome: str,
+    *,
+    kind: str,
+    file_name: str | None,
+    size_bytes: int | None,
+    error: str | None,
+    consecutive_failures: int,
+) -> None:
+    """Record one backup attempt durably. Survives restarts."""
+    global _latest_event
+    db = SessionLocal()
+    try:
+        event = BackupEvent(
+            id=new_id("bevt"),
+            outcome=outcome,
+            kind=kind,
+            file_name=file_name,
+            size_bytes=size_bytes,
+            error=(error[:2000] if error else None),
+            consecutive_failures=consecutive_failures,
         )
+        db.add(event)
+        db.commit()
+        db.refresh(event)
+        _latest_event = {
+            "id": event.id,
+            "created_at": (event.created_at.replace(tzinfo=timezone.utc) if event.created_at and event.created_at.tzinfo is None else event.created_at),
+            "outcome": outcome,
+            "kind": kind,
+            "file_name": file_name,
+            "size_bytes": size_bytes,
+            "error": error,
+            "consecutive_failures": consecutive_failures,
+        }
+    except Exception as exc:
+        # Never let alerting/audit take down a backup. Log and continue.
+        print(f"[backups] could not persist event: {exc}", flush=True)
+    finally:
+        db.close()
 
 
-def _record_failure(error: str) -> None:
-    with _backup_lock:
-        _status["last_error"] = error
-        _status["last_error_at"] = _utcnow().isoformat()
-        _status["consecutive_failures"] = int(_status.get("consecutive_failures") or 0) + 1
+def _fire_alert(payload: dict, *, force: bool = False) -> None:
+    """POST an alert to the configured webhook. Best-effort, never raises."""
+    if not ALERT_WEBHOOK_URL:
+        return
+    try:
+        import httpx
+
+        with httpx.Client(timeout=10.0) as client:
+            client.post(ALERT_WEBHOOK_URL, json=payload)
+    except Exception as exc:
+        print(f"[backups] alert webhook failed: {exc}", flush=True)
+
+
+def backup_status() -> dict:
+    """Snapshot-system health, sourced from the durable backup_events table."""
+    db = SessionLocal()
+    try:
+        latest = db.query(BackupEvent).order_by(BackupEvent.created_at.desc()).first()
+    finally:
+        db.close()
+
+    if not latest:
+        return {
+            "healthy": False,
+            "directory": BACKUP_DIR,
+            "interval_seconds": BACKUP_INTERVAL_SECONDS,
+            "last_success_at": None,
+            "last_success_file": None,
+            "last_success_age_seconds": None,
+            "last_error": None,
+            "last_error_at": None,
+            "consecutive_failures": 0,
+        }
+
+    created = latest.created_at
+    if created and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age = int((_utcnow() - created).total_seconds()) if created else None
+
+    # Find the most recent success for the "last successful backup" fields.
+    db = SessionLocal()
+    try:
+        last_success = (
+            db.query(BackupEvent)
+            .filter(BackupEvent.outcome == "success")
+            .order_by(BackupEvent.created_at.desc())
+            .first()
+        )
+    finally:
+        db.close()
+    if last_success and last_success.created_at:
+        ls_at = last_success.created_at
+        if ls_at.tzinfo is None:
+            ls_at = ls_at.replace(tzinfo=timezone.utc)
+        last_success_at = ls_at.isoformat()
+        last_success_age = int((_utcnow() - ls_at).total_seconds())
+    else:
+        last_success_at = None
+        last_success_age = None
+
+    cf = latest.consecutive_failures or 0
+    stale = last_success_age is None or last_success_age > BACKUP_INTERVAL_SECONDS * 2 + 300
+    return {
+        "healthy": bool(last_success_at) and not stale and cf == 0,
+        "directory": BACKUP_DIR,
+        "interval_seconds": BACKUP_INTERVAL_SECONDS,
+        "last_success_at": last_success_at,
+        "last_success_file": last_success.file_name if last_success else None,
+        "last_success_age_seconds": last_success_age,
+        "last_error": latest.error if latest.outcome == "failure" else None,
+        "last_error_at": created.isoformat() if latest.outcome == "failure" else None,
+        "consecutive_failures": cf,
+    }
 
 
 def _collect_stats(db) -> dict:
@@ -232,6 +318,15 @@ def mirror_data_files() -> dict:
     return {"enabled": True, "copied": copied, "skipped": skipped, "failed": failed}
 
 
+def _current_consecutive_failures() -> int:
+    db = SessionLocal()
+    try:
+        latest = db.query(BackupEvent).order_by(BackupEvent.created_at.desc()).first()
+        return (latest.consecutive_failures or 0) if latest and latest.outcome == "failure" else 0
+    finally:
+        db.close()
+
+
 def run_backup(kind: str = "scheduled", notes: str | None = None, mirror: bool = True) -> DbSnapshot:
     """Create one snapshot now and record it. Raises BackupError on failure."""
     with _backup_lock:
@@ -246,11 +341,40 @@ def run_backup(kind: str = "scheduled", notes: str | None = None, mirror: bool =
             else:
                 _snapshot_postgres(target)
         except BackupError as exc:
-            _record_failure(str(exc))
+            cf = _current_consecutive_failures() + 1
+            _persist_event(
+                "failure", kind=kind, file_name=None, size_bytes=None,
+                error=str(exc), consecutive_failures=cf,
+            )
+            if cf >= ALERT_MIN_FAILURES:
+                _fire_alert({
+                    "source": "whatsapp-strategy-canvas",
+                    "severity": "critical",
+                    "event": "backup_failed",
+                    "consecutive_failures": cf,
+                    "error": str(exc),
+                    "backend": DB_BACKEND,
+                    "directory": BACKUP_DIR,
+                })
             raise
         except Exception as exc:
-            _record_failure(f"{type(exc).__name__}: {exc}")
-            raise BackupError(str(exc)) from exc
+            cf = _current_consecutive_failures() + 1
+            msg = f"{type(exc).__name__}: {exc}"
+            _persist_event(
+                "failure", kind=kind, file_name=None, size_bytes=None,
+                error=msg, consecutive_failures=cf,
+            )
+            if cf >= ALERT_MIN_FAILURES:
+                _fire_alert({
+                    "source": "whatsapp-strategy-canvas",
+                    "severity": "critical",
+                    "event": "backup_failed",
+                    "consecutive_failures": cf,
+                    "error": msg,
+                    "backend": DB_BACKEND,
+                    "directory": BACKUP_DIR,
+                })
+            raise BackupError(msg) from exc
 
         size = target.stat().st_size if target.is_file() else 0
         file_stats = mirror_data_files() if mirror else {"enabled": False}
@@ -272,10 +396,25 @@ def run_backup(kind: str = "scheduled", notes: str | None = None, mirror: bool =
             db.add(snapshot)
             db.commit()
             db.refresh(snapshot)
-            _record_success(file_name)
-            return snapshot
         finally:
             db.close()
+
+        # Success. If we were in a failure streak, this is the recovery — alert it.
+        prev_failures = _current_consecutive_failures()
+        _persist_event(
+            "success", kind=kind, file_name=file_name, size_bytes=size,
+            error=None, consecutive_failures=0,
+        )
+        if prev_failures >= ALERT_MIN_FAILURES:
+            _fire_alert({
+                "source": "whatsapp-strategy-canvas",
+                "severity": "info",
+                "event": "backup_recovered",
+                "previous_failures": prev_failures,
+                "file_name": file_name,
+                "size_bytes": size,
+            })
+        return snapshot
 
 
 def snapshot_before_destructive(action: str, actor: str | None = None) -> DbSnapshot | None:

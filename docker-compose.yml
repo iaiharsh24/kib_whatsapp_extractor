@@ -15,6 +15,10 @@ services:
       WA_BACKUP_INTERVAL_SECONDS: ${WA_BACKUP_INTERVAL_SECONDS:-3600}
       WA_BACKUP_MIRROR_FILES: ${WA_BACKUP_MIRROR_FILES:-1}
       WA_REQUIRE_BACKUP_BEFORE_DELETE: ${WA_REQUIRE_BACKUP_BEFORE_DELETE:-1}
+      # Optional: POST a JSON alert here on backup failure (and on recovery).
+      # Leave blank to disable. Slack/Discord/Teams/healthchecks.io all work.
+      WA_BACKUP_ALERT_WEBHOOK: ${WA_BACKUP_ALERT_WEBHOOK:-}
+      WA_BACKUP_ALERT_MIN_FAILURES: ${WA_BACKUP_ALERT_MIN_FAILURES:-1}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemma-4-31b-it:free}
       OPENROUTER_APP_NAME: ${OPENROUTER_APP_NAME:-WhatsApp Strategy Canvas}

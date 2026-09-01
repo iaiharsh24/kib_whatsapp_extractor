@@ -275,3 +275,24 @@ class DbSnapshot(Base):
     size_bytes = Column(Integer, nullable=False, default=0)
     stats = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)
+
+
+class BackupEvent(Base):
+    """Durable record of every backup attempt — successes AND failures.
+
+    Failures don't produce a DbSnapshot row (run_backup raises before recording),
+    so without this table a failed backup leaves no trace and the in-memory
+    status is wiped on the next container restart. This table is the source of
+    truth for /health and the control-center banner.
+    """
+
+    __tablename__ = "backup_events"
+
+    id = Column(String, primary_key=True, default=lambda: new_id("bevt"))
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+    outcome = Column(String, nullable=False)  # success | failure
+    kind = Column(String, nullable=False)  # scheduled | manual | pre-delete
+    file_name = Column(String, nullable=True)
+    size_bytes = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
