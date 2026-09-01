@@ -52,3 +52,13 @@ export async function setActiveWorkspaceId(id: string) {
 export async function refreshWorkspaces(): Promise<WorkspaceRecord[]> {
   return loadWorkspaces();
 }
+
+export async function createWorkspace(name: string): Promise<WorkspaceRecord> {
+  const created = await api<WorkspaceRecord>("/api/workspaces", {
+    method: "POST",
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  await refreshWorkspaces();
+  await setActiveWorkspaceId(created.id);
+  return created;
+}

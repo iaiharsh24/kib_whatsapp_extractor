@@ -7,8 +7,10 @@ import { api, clearSession, getUser } from "@/lib/api";
 import { getPreference, loadPreferences, savePreference } from "@/lib/preferences";
 import {
   WORKSPACE_EVENT,
+  createWorkspace,
   getActiveWorkspace,
   getActiveWorkspaceId,
+  getWorkspaces,
   loadWorkspaces,
   refreshWorkspaces,
   setActiveWorkspaceId,
@@ -86,16 +88,12 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     if ((pathname ?? "").startsWith("/projects/")) router.push("/");
   }
 
-  async function createWorkspace() {
+  async function createWorkspacePrompt() {
     const name = window.prompt("Workspace name?", "My workspace");
     if (!name?.trim()) return;
     try {
-      const created = await api<WorkspaceRecord>("/api/workspaces", {
-        method: "POST",
-        body: JSON.stringify({ name: name.trim() }),
-      });
-      await refreshWorkspaces();
-      await setActiveWorkspaceId(created.id);
+      const created = await createWorkspace(name.trim());
+      setWorkspaces(getWorkspaces());
       setActiveWorkspace(created);
       await loadProjects();
     } catch (err) {
@@ -210,7 +208,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               ))}
             </select>
             <div className="mt-2 flex gap-2 text-[11px]">
-              <button type="button" onClick={() => void createWorkspace()} className="text-emerald-400 hover:underline">
+              <button type="button" onClick={() => void createWorkspacePrompt()} className="text-emerald-400 hover:underline">
                 New
               </button>
               <Link href="/workspace" className="text-zinc-400 hover:text-white hover:underline">

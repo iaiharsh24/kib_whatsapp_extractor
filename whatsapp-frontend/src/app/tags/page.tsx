@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { getActiveWorkspaceId, loadWorkspaces } from "@/lib/workspace";
+import { getActiveWorkspaceId, loadWorkspaces, WORKSPACE_EVENT } from "@/lib/workspace";
 import type { TagRecord } from "@/lib/types";
 
 export default function TagsPage() {
@@ -24,6 +24,14 @@ export default function TagsPage() {
     void loadWorkspaces()
       .then(() => load())
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load tags"));
+  }, [workspaceId]);
+
+  useEffect(() => {
+    function onWorkspaceChange() {
+      void load().catch((err) => setError(err instanceof Error ? err.message : "Failed to load tags"));
+    }
+    window.addEventListener(WORKSPACE_EVENT, onWorkspaceChange);
+    return () => window.removeEventListener(WORKSPACE_EVENT, onWorkspaceChange);
   }, [workspaceId]);
 
   async function createTag() {
@@ -56,7 +64,9 @@ export default function TagsPage() {
   return (
     <div className="h-full overflow-auto p-8">
       <h2 className="text-2xl font-semibold">Tags</h2>
-      <p className="mt-1 text-sm text-zinc-600">Global tag registry for the active workspace.</p>
+      <p className="mt-1 text-sm text-zinc-600">
+        Shared tag registry for the active workspace. Tags on library media are visible to all workspace members.
+      </p>
       {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
 
       <div className="mt-6 flex flex-wrap gap-2">

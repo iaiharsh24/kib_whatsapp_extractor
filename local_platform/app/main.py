@@ -779,6 +779,22 @@ async def accept_invite(
     }
 
 
+def _ensure_tags_in_registry(db: Session, workspace_id: str | None, tag_names: list[str]) -> None:
+    if not workspace_id:
+        return
+    existing = {tag.name.lower() for tag in db.query(Tag).filter(Tag.workspace_id == workspace_id).all()}
+    changed = False
+    for raw in tag_names:
+        name = " ".join(str(raw or "").split())[:40]
+        if not name or name.lower() in TYPE_TAGS or name.lower() in existing:
+            continue
+        db.add(Tag(workspace_id=workspace_id, name=name))
+        existing.add(name.lower())
+        changed = True
+    if changed:
+        db.commit()
+
+
 def _sync_tag_registry(db: Session, workspace_id: str) -> dict[str, int]:
     """Scan free-form tags on messages + canvas nodes for this workspace, bootstrap the
     Tag registry with any names not seen yet, and return usage counts by tag name (lowercase)."""
@@ -1127,6 +1143,9 @@ async def library_filters(
             label = preview.get("site") or preview.get("domain")
             if label:
                 sites.add(label)
+    for row in db.query(Tag.name).filter(Tag.workspace_id == workspace_id).all():
+        if row[0]:
+            tags.add(row[0])
     return {
         "senders": senders,
         "tags": sorted(tags),
@@ -1189,7 +1208,9 @@ async def patch_message_tags(
     if message.workspace_id:
         require_workspace_member(message.workspace_id, user, db)
     kept = [item for item in (message.tags or []) if isinstance(item, str) and item.lower() in TYPE_TAGS]
-    message.tags = kept + clean_user_tags(body.tags)
+    user_tags = clean_user_tags(body.tags)
+    message.tags = kept + user_tags
+    _ensure_tags_in_registry(db, message.workspace_id, user_tags)
     db.commit()
     db.refresh(message)
     return serialize_message(message)

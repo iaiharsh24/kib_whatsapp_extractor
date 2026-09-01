@@ -73,6 +73,18 @@ export default function LibraryPage() {
       setUploadFilterId("");
       setUploadBanner(null);
       void load(0).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+      const workspaceId = getActiveWorkspaceId();
+      if (!workspaceId) return;
+      void api<LibraryFilterOptions>(`/api/library/filters?${workspaceQuery()}`)
+        .then((data) => {
+          setSenders(data.senders);
+          setChats(data.chats || []);
+          setSites(data.sites || []);
+        })
+        .catch(() => undefined);
+      void api<TagRecord[]>(`/api/workspaces/${workspaceId}/tags`)
+        .then((rows) => setTags(rows.map((row) => row.name)))
+        .catch(() => undefined);
     }
     window.addEventListener(WORKSPACE_EVENT, onWorkspaceChange);
     return () => window.removeEventListener(WORKSPACE_EVENT, onWorkspaceChange);
