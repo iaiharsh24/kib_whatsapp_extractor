@@ -49,7 +49,8 @@ export function describeActivity(log: ActivityLogRecord): { who: string; what: s
   return { who, what };
 }
 
-export function roleBadge(role: string | null | undefined): string {
+export function roleBadge(role: string | null | undefined, viewerSuper = false): string {
   if (!role) return "MEMBER";
+  if (role === "superadmin" && !viewerSuper) return "ADMIN";
   return role.toUpperCase();
 }

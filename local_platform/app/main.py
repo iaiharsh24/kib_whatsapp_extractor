@@ -25,8 +25,23 @@ _LOCAL_PLATFORM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _LOCAL_PLATFORM not in sys.path:
     sys.path.insert(0, _LOCAL_PLATFORM)
 
-from app.activity import log_activity, serialize_activity_log
-from app.auth import bearer, get_current_user, hash_password, make_token, require_admin, require_super_admin, is_super_admin, serialize_user, user_from_token, verify_password, SUPER_ADMIN_EMAILS
+from app.activity import activity_visible_to_viewer, log_activity, serialize_activity_log
+from app.auth import (
+    assert_user_manageable,
+    bearer,
+    get_current_user,
+    hash_password,
+    is_super_admin,
+    make_token,
+    require_admin,
+    require_super_admin,
+    serialize_user,
+    super_admin_user_ids,
+    user_from_token,
+    verify_password,
+    SUPER_ADMIN_EMAILS,
+    visible_users_for_admin,
+)
 from app.backups import run_backup, serialize_snapshot, start_backup_scheduler
 from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
 from app.llm import build_prompt, complete
@@ -1318,6 +1333,55 @@ async def library(
     }
 
 
+@app.get("/api/projects/{project_id}/library/uploads")
+async def library_uploads(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Per-zip library breakdown for a project (message counts by media type)."""
+    require_project_access(project_id, user, db)
+    uploads = (
+        db.query(Upload)
+        .filter(Upload.project_id == project_id)
+        .order_by(Upload.uploaded_at.desc())
+        .all()
+    )
+    uploaders = {item.id: item.username for item in db.query(User).all()}
+    type_rows = (
+        db.query(Message.upload_id, Message.type, func.count(Message.id))
+        .filter(Message.project_id == project_id)
+        .group_by(Message.upload_id, Message.type)
+        .all()
+    )
+    by_upload: dict[str, dict[str, int]] = {}
+    for upload_id, msg_type, count in type_rows:
+        if not upload_id:
+            continue
+        bucket = by_upload.setdefault(upload_id, {})
+        bucket[msg_type] = int(count or 0)
+
+    summaries = []
+    for upload in uploads:
+        types = by_upload.get(upload.id, {})
+        image_count = types.get("image", 0) + types.get("media_omitted", 0)
+        link_count = types.get("link", 0)
+        summaries.append(
+            {
+                "upload": serialize_upload(upload, uploaders.get(upload.uploaded_by)),
+                "counts": {
+                    "chat": types.get("chat", 0),
+                    "link": link_count,
+                    "document": types.get("document", 0),
+                    "image": image_count,
+                    "reel": types.get("reel", 0),
+                    "total": sum(types.values()),
+                },
+            }
+        )
+    return summaries
+
+
 @app.get("/api/library/filters")
 async def library_filters(
     project_id: str = Query(...),
@@ -1931,12 +1995,34 @@ async def list_activity_logs(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
+    viewer_super = is_super_admin(admin)
     query = db.query(ActivityLog)
     if workspace_id:
         query = query.filter(ActivityLog.workspace_id == workspace_id)
+    if not viewer_super:
+        hidden_ids = super_admin_user_ids(db)
+        query = query.filter(ActivityLog.user_role != "superadmin")
+        query = query.filter(~ActivityLog.action.like("db.%"))
+        if hidden_ids:
+            query = query.filter(~ActivityLog.user_id.in_(hidden_ids))
     total = query.count()
     rows = query.order_by(ActivityLog.created_at.desc()).offset(offset).limit(limit).all()
-    return {"total": total, "items": [serialize_activity_log(row) for row in rows]}
+    if viewer_super:
+        visible_rows = rows
+    else:
+        actor_ids = {row.user_id for row in rows if row.user_id}
+        actors = (
+            {item.id: item for item in db.query(User).filter(User.id.in_(actor_ids)).all()}
+            if actor_ids
+            else {}
+        )
+        visible_rows = [
+            row for row in rows if activity_visible_to_viewer(row, admin, actors.get(row.user_id))
+        ]
+    return {
+        "total": total,
+        "items": [serialize_activity_log(row, viewer_super=viewer_super) for row in visible_rows],
+    }
 
 
 # ---------- Super-admin: Database overview + snapshots ----------
@@ -2084,15 +2170,14 @@ async def delete_db_snapshot(
 
 @app.get("/api/admin/users")
 async def list_users(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
-    return [serialize_user(item) for item in db.query(User).order_by(User.username.asc()).all()]
+    return [serialize_user(item, viewer=admin) for item in visible_users_for_admin(db, admin)]
 
 
 @app.post("/api/admin/users", status_code=201)
 async def add_user(body: UserCreate, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
-    if body.role not in {"superadmin", "admin", "member"}:
-        raise HTTPException(status_code=400, detail="Role must be superadmin, admin or member")
-    if body.role == "superadmin" and not is_super_admin(admin):
-        raise HTTPException(status_code=403, detail="Only a super admin can create super admin accounts")
+    allowed_roles = {"superadmin", "admin", "member"} if is_super_admin(admin) else {"admin", "member"}
+    if body.role not in allowed_roles:
+        raise HTTPException(status_code=400, detail="Invalid role")
     email = (body.email or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
@@ -2116,7 +2201,7 @@ async def add_user(body: UserCreate, db: Session = Depends(get_db), admin: User 
     )
     db.commit()
     db.refresh(user)
-    data = serialize_user(user)
+    data = serialize_user(user, viewer=admin)
     data["temporary_password"] = temp
     return data
 
@@ -2196,6 +2281,7 @@ async def reset_password(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    assert_user_manageable(user, admin)
     temp = body.password or secrets.token_urlsafe(8)
     user.password_hash = hash_password(temp)
     log_activity(
@@ -2217,14 +2303,13 @@ async def change_role(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    if body.role not in {"superadmin", "admin", "member"}:
-        raise HTTPException(status_code=400, detail="Role must be superadmin, admin or member")
-    if body.role == "superadmin" and not is_super_admin(admin):
-        raise HTTPException(status_code=403, detail="Only a super admin can grant super admin")
+    allowed_roles = {"superadmin", "admin", "member"} if is_super_admin(admin) else {"admin", "member"}
+    if body.role not in allowed_roles:
+        raise HTTPException(status_code=400, detail="Invalid role")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    # Prevent demoting yourself out of superadmin if you'd be the last one.
+    assert_user_manageable(user, admin)
     if is_super_admin(user) and body.role != "superadmin" and user.id == admin.id:
         super_count = db.query(User).filter(User.role == "superadmin").count()
         email_super = sum(
@@ -2232,7 +2317,7 @@ async def change_role(
             if u.email and u.email.lower() in SUPER_ADMIN_EMAILS
         )
         if super_count + email_super <= 1:
-            raise HTTPException(status_code=400, detail="You are the only super admin — promote someone else first")
+            raise HTTPException(status_code=400, detail="You cannot change your own role right now")
     user.role = body.role
     log_activity(
         db,
@@ -2244,7 +2329,7 @@ async def change_role(
         details={"role": body.role},
     )
     db.commit()
-    return serialize_user(user)
+    return serialize_user(user, viewer=admin)
 
 
 @app.delete("/api/admin/users/{user_id}")
@@ -2254,6 +2339,9 @@ async def remove_user(user_id: str, db: Session = Depends(get_db), admin: User =
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    assert_user_manageable(user, admin)
+    if is_super_admin(user):
+        raise HTTPException(status_code=400, detail="This account cannot be removed")
     removed_name = user.email or user.username
     log_activity(
         db,

@@ -124,6 +124,18 @@ export type LibraryResponse = {
   };
 };
 
+export type UploadLibrarySummary = {
+  upload: UploadRecord;
+  counts: {
+    chat: number;
+    link: number;
+    document: number;
+    image: number;
+    reel: number;
+    total: number;
+  };
+};
+
 export type LibraryFilterOptions = {
   senders: string[];
   tags: string[];

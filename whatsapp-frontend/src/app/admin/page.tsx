@@ -49,7 +49,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     const me = getUser();
-    if (me && me.role !== "admin" && me.role !== "superadmin" && !me.is_super_admin) {
+    if (me && me.role !== "admin" && !me.is_super_admin) {
       router.replace("/");
       return;
     }
@@ -198,7 +198,7 @@ export default function AdminPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-mono text-xs font-semibold text-emerald-800">{who}</span>
                       <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">
-                        {roleBadge(log.user_role)}
+                        {roleBadge(log.user_role, isSuper)}
                       </span>
                       <span className="text-xs text-zinc-400">{formatWhen(log.created_at)}</span>
                     </div>
@@ -289,8 +289,18 @@ export default function AdminPage() {
       <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">Team management</h3>
         <p className="mt-1 text-sm text-zinc-600">
-          Create a login directly for someone on your team. Roles: <span className="font-medium">superadmin</span> (you) →{" "}
-          <span className="font-medium">admin</span> → <span className="font-medium">member</span>.
+          {isSuper ? (
+            <>
+              Create a login directly for someone on your team. Roles:{" "}
+              <span className="font-medium">superadmin</span> (you) →{" "}
+              <span className="font-medium">admin</span> → <span className="font-medium">member</span>.
+            </>
+          ) : (
+            <>
+              Create a login directly for someone on your team. Roles:{" "}
+              <span className="font-medium">admin</span> → <span className="font-medium">member</span>.
+            </>
+          )}
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <input
@@ -331,25 +341,25 @@ export default function AdminPage() {
           </thead>
           <tbody>
             {users.map((user) => {
-              const canEditRole = isSuper || user.role !== "superadmin";
+              const canEditRole = isSuper || !user.is_super_admin;
               return (
                 <tr key={user.id} className="border-t border-zinc-100 align-top">
                   <td className="py-2">
                     <p className="font-medium">{user.email || user.username}</p>
-                    {user.is_super_admin ? (
+                    {isSuper && user.is_super_admin ? (
                       <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700">super admin</span>
                     ) : null}
                   </td>
                   <td className="py-2">
                     <select
-                      value={user.role}
+                      value={user.role === "superadmin" && !isSuper ? "admin" : user.role}
                       disabled={!canEditRole}
                       onChange={(event) => void changeRole(user.id, event.target.value as "superadmin" | "admin" | "member")}
                       className="rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
                     >
                       <option value="member">member</option>
                       <option value="admin">admin</option>
-                      <option value="superadmin" disabled={!isSuper}>superadmin</option>
+                      {isSuper ? <option value="superadmin">superadmin</option> : null}
                     </select>
                   </td>
                   <td className="py-2">
@@ -383,9 +393,9 @@ export default function AdminPage() {
                     <button
                       type="button"
                       onClick={() => void removeUser(user.id)}
-                      disabled={user.is_super_admin}
+                      disabled={!!user.is_super_admin}
                       className="text-red-600 disabled:opacity-40 disabled:cursor-not-allowed"
-                      title={user.is_super_admin ? "Super admins cannot be removed here" : "Remove user"}
+                      title={user.is_super_admin ? "This account cannot be removed" : "Remove user"}
                     >
                       Remove
                     </button>

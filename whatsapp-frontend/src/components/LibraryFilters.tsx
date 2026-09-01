@@ -46,6 +46,20 @@ export function librarySearchParams(
   return params;
 }
 
+export function libraryQuery(
+  projectId: string,
+  tab: string,
+  filters: LibraryFilterState,
+  options?: { uploadId?: string | null; limit?: number },
+): URLSearchParams {
+  const params = librarySearchParams(tab, filters, {
+    project_id: projectId,
+    limit: String(options?.limit ?? 50),
+  });
+  if (options?.uploadId) params.set("upload_id", options.uploadId);
+  return params;
+}
+
 function formatChip(key: Exclude<FilterKey, "q">, value: string): string {
   const level = LEVELS.find((item) => item.key === key);
   if (key === "dateFrom") return `From ${value}`;
