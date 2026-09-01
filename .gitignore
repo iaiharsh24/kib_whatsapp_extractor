@@ -1,0 +1,35 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+!deploy/.env.example
+*.pem
+*.key
+credentials.json
+
+# Python
+local_platform/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Node / Next.js
+whatsapp-frontend/node_modules/
+whatsapp-frontend/.next/
+whatsapp-frontend/out/
+whatsapp-frontend/.vercel/
+*.tsbuildinfo
+
+# Local runtime data (SQLite, uploads, extracted zips)
+local_data/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+*.log

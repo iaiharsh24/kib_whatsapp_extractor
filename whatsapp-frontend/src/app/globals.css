@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f3efe6;
+  --foreground: #18181b;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+.miro-board.react-flow {
+  background: #f5f5f5;
+}
+
+.miro-board .react-flow__background {
+  background: #f5f5f5;
+}
+
+.miro-board .react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.miro-board .react-flow__node:hover .react-flow__handle,
+.miro-board .react-flow__node.selected .react-flow__handle {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.miro-board .react-flow__selection {
+  background: rgba(66, 98, 255, 0.08);
+  border: 1px solid #4262ff;
+}
+
+.miro-board .react-flow__nodesselection-rect {
+  background: transparent;
+  border: 1px solid #4262ff;
+}
+
+.miro-board .react-flow__edge.selected .react-flow__edge-path,
+.miro-board .react-flow__edge:focus .react-flow__edge-path {
+  stroke: #4262ff;
+}
+
+.miro-board .react-flow__connection-path {
+  stroke: #4262ff;
+}
+
+.miro-board .react-flow__resize-control.handle {
+  width: 8px;
+  height: 8px;
+  border: 2px solid #4262ff;
+  background: #fff;
+  border-radius: 2px;
+}
+
+.miro-board .react-flow__minimap {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.miro-board .react-flow__node-group {
+  background: transparent;
+  border: none;
+  padding: 0;
+}

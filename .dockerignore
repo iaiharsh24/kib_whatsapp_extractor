@@ -1,0 +1,7 @@
+.git
+local_platform/.venv
+whatsapp-frontend/node_modules
+whatsapp-frontend/.next
+local_data
+*.db
+.env
