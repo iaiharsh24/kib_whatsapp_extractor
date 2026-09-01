@@ -12,7 +12,7 @@ export default function ProjectChat({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(true);
 
   useEffect(() => {
-    void loadPreferences().then(() => setOpen(getPreference("ai_collapsed", false) !== true));
+    void loadPreferences().then(() => setOpen(getPreference<boolean>("ai_collapsed", false) !== true));
     void api<ChatEntry[]>(`/api/projects/${projectId}/chat`)
       .then(setLog)
       .catch(() => setLog([]));

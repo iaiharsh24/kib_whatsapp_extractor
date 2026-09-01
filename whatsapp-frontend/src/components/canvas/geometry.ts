@@ -206,12 +206,11 @@ export function groupSelected(nodes: Node[], uid: (prefix: string) => string) {
   };
   const nextById = new Map(byId);
   nextById.set(id, groupNode);
-  return nodes
-    .map((node) => {
-      if (!ids.has(node.id)) return { ...node, selected: false };
-      return { ...withParent(node, groupNode, nextById, true), selected: false };
-    })
-    .concat(groupNode);
+  const updated = nodes.map((node) => {
+    if (!ids.has(node.id)) return { ...node, selected: false as const };
+    return { ...withParent(node, groupNode, nextById, true), selected: false as const };
+  });
+  return [...updated, groupNode];
 }
 
 export function ungroupSelected(nodes: Node[]) {

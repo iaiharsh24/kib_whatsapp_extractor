@@ -107,9 +107,9 @@ export default function StrategyBoard({
         void api(`/api/projects/${projectId}/canvas`, {
           method: "PUT",
           body: JSON.stringify({
-            nodes: cards.map(stripHandlers),
-            edges: getEdges().map(stripHandlers),
-            frames: frames.map(stripHandlers),
+            nodes: cards.map(stripNode),
+            edges: getEdges().map(stripEdge),
+            frames: frames.map(stripNode),
             viewport,
           }),
         });
@@ -127,9 +127,9 @@ export default function StrategyBoard({
         void api(`/api/projects/${projectId}/canvas`, {
           method: "PUT",
           body: JSON.stringify({
-            nodes: cards.map(stripHandlers),
-            edges: nextEdges.map(stripHandlers),
-            frames: frames.map(stripHandlers),
+            nodes: cards.map(stripNode),
+            edges: nextEdges.map(stripEdge),
+            frames: frames.map(stripNode),
             viewport: viewRef.current,
           }),
         }).then(() =>
@@ -186,8 +186,8 @@ export default function StrategyBoard({
 
   function snapshot() {
     past.current.push({
-      nodes: structuredClone(getNodes().map(stripHandlers)),
-      edges: structuredClone(getEdges().map(stripHandlers)),
+      nodes: structuredClone(getNodes().map(stripNode)),
+      edges: structuredClone(getEdges().map(stripEdge)),
     });
     if (past.current.length > 60) past.current.shift();
     future.current = [];
@@ -197,7 +197,7 @@ export default function StrategyBoard({
   function undo() {
     const prev = past.current.pop();
     if (!prev) return;
-    future.current.push({ nodes: getNodes().map(stripHandlers), edges: getEdges().map(stripHandlers) });
+    future.current.push({ nodes: getNodes().map(stripNode), edges: getEdges().map(stripEdge) });
     setNodes(prev.nodes);
     setEdges(prev.edges);
     bump((value) => value + 1);
@@ -206,7 +206,7 @@ export default function StrategyBoard({
   function redo() {
     const next = future.current.pop();
     if (!next) return;
-    past.current.push({ nodes: getNodes().map(stripHandlers), edges: getEdges().map(stripHandlers) });
+    past.current.push({ nodes: getNodes().map(stripNode), edges: getEdges().map(stripEdge) });
     setNodes(next.nodes);
     setEdges(next.edges);
     bump((value) => value + 1);
@@ -361,7 +361,7 @@ export default function StrategyBoard({
     const copies = all
       .filter((node) => include.has(node.id))
       .map((node) => ({
-        ...structuredClone(stripHandlers(node)),
+        ...structuredClone(stripNode(node)),
         id: remap.get(node.id) as string,
         parentId: node.parentId ? remap.get(node.parentId) || node.parentId : undefined,
         position: node.parentId ? node.position : { x: node.position.x + 28, y: node.position.y + 28 },
@@ -471,8 +471,8 @@ export default function StrategyBoard({
     const all = getNodes();
     const include = collectWithChildren(all, ids);
     const payload = {
-      nodes: all.filter((node) => include.has(node.id)).map(stripHandlers),
-      edges: getEdges().filter((edge) => include.has(edge.source) && include.has(edge.target)).map(stripHandlers),
+      nodes: all.filter((node) => include.has(node.id)).map(stripNode),
+      edges: getEdges().filter((edge) => include.has(edge.source) && include.has(edge.target)).map(stripEdge),
     };
     window.localStorage.setItem("wa_canvas_clip", JSON.stringify(payload));
   }
@@ -1028,13 +1028,22 @@ export default function StrategyBoard({
   );
 }
 
-function stripHandlers(value: Node | Edge): Node | Edge {
-  if ("data" in value && value.data && typeof value.data === "object") {
+function stripNode(value: Node): Node {
+  if (value.data && typeof value.data === "object") {
     const data = { ...(value.data as Record<string, unknown>) };
     delete data.onChange;
-    const next = { ...value, data } as Node;
-    delete (next as Node).hidden;
+    const next = { ...value, data };
+    delete next.hidden;
     return next;
+  }
+  return value;
+}
+
+function stripEdge(value: Edge): Edge {
+  if (value.data && typeof value.data === "object") {
+    const data = { ...(value.data as Record<string, unknown>) };
+    delete data.onChange;
+    return { ...value, data };
   }
   return value;
 }

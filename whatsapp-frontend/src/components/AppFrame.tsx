@@ -9,8 +9,9 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [ready, setReady] = useState(false);
-  const isLogin = pathname === "/login";
-  const isInvite = pathname.startsWith("/invite/");
+  const path = pathname ?? "";
+  const isLogin = path === "/login";
+  const isInvite = path.startsWith("/invite/");
 
   useEffect(() => {
     const token = getToken();

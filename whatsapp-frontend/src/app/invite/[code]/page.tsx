@@ -8,7 +8,7 @@ import type { AuthResponse, InvitePreview } from "@/lib/types";
 export default function InvitePage() {
   const params = useParams<{ code: string }>();
   const router = useRouter();
-  const code = params.code;
+  const code = params?.code ?? "";
   const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

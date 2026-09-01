@@ -25,7 +25,7 @@ const LIB_TABS = [
 
 export default function ProjectPage() {
   const params = useParams<{ id: string }>();
-  const projectId = params.id;
+  const projectId = params?.id ?? "";
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [library, setLibrary] = useState<MessageRecord[]>([]);
   const [libraryTotal, setLibraryTotal] = useState(0);
@@ -41,7 +41,7 @@ export default function ProjectPage() {
   });
 
   useEffect(() => {
-    void loadPreferences().then(() => setLibraryOpen(getPreference("library_collapsed", false) !== true));
+    void loadPreferences().then(() => setLibraryOpen(getPreference<boolean>("library_collapsed", false) !== true));
   }, []);
 
   useEffect(() => {

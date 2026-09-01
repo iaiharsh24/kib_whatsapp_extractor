@@ -38,7 +38,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    void loadPreferences().then(() => setCollapsed(getPreference("nav_collapsed", false) === true));
+    void loadPreferences().then(() => setCollapsed(getPreference<boolean>("nav_collapsed", false) === true));
   }, []);
 
   useEffect(() => {
@@ -83,7 +83,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     setWorkspaces(list);
     setActiveWorkspace(getActiveWorkspace());
     await loadProjects();
-    if (pathname.startsWith("/projects/")) router.push("/");
+    if ((pathname ?? "").startsWith("/projects/")) router.push("/");
   }
 
   async function createWorkspace() {
@@ -235,7 +235,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             title="Tags"
             className={`rounded-md text-sm ${
               collapsed ? "px-0 py-2 text-center" : "px-3 py-2"
-            } ${pathname.startsWith("/tags") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
+            } ${(pathname ?? "").startsWith("/tags") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
           >
             {collapsed ? "T" : "Tags"}
           </Link>
@@ -245,7 +245,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               title="Admin"
               className={`rounded-md text-sm ${
                 collapsed ? "px-0 py-2 text-center" : "px-3 py-2"
-              } ${pathname.startsWith("/admin") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
+              } ${(pathname ?? "").startsWith("/admin") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
             >
               {collapsed ? "A" : "Admin"}
             </Link>
