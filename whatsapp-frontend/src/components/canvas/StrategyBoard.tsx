@@ -618,8 +618,16 @@ export default function StrategyBoard({
   }
 
   async function duplicateBoard() {
-    const created = await api<ProjectRecord>(`/api/projects/${projectId}/duplicate`, { method: "POST" });
-    window.location.href = `/projects/${created.id}`;
+    try {
+      const created = await api<ProjectRecord>(`/api/projects/${projectId}/duplicate`, { method: "POST" });
+      window.location.href = `/projects/${created.id}`;
+    } catch (err) {
+      window.dispatchEvent(
+        new CustomEvent("wa-shell-error", {
+          detail: { message: err instanceof Error ? err.message : "Could not duplicate board" },
+        }),
+      );
+    }
   }
 
   useEffect(() => {

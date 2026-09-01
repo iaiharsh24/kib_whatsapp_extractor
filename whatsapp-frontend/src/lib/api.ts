@@ -29,6 +29,26 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
+function parseApiError(body: string, status: number): string {
+  const trimmed = body.trim();
+  if (!trimmed) return `Request failed (${status})`;
+  try {
+    const parsed = JSON.parse(trimmed) as { detail?: unknown };
+    const detail = parsed.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0] as { msg?: string };
+      if (first?.msg) return first.msg;
+    }
+  } catch {
+    // Plain-text body from the proxy or server.
+  }
+  if (trimmed === "Internal Server Error") {
+    return "The server hit an unexpected error. Refresh the page and try again.";
+  }
+  return trimmed;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   const token = getToken();
@@ -45,7 +65,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(detail || `Request failed (${res.status})`);
+    throw new Error(parseApiError(detail, res.status));
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

@@ -28,6 +28,12 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
+  const [shellError, setShellError] = useState<string | null>(null);
+
+  const showShellError = (message: string) => {
+    setShellError(message);
+    window.setTimeout(() => setShellError((current) => (current === message ? null : current)), 8000);
+  };
 
   const loadProjects = useCallback(async () => {
     const workspaceId = getActiveWorkspaceId();
@@ -62,8 +68,16 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       setActiveWorkspace(getActiveWorkspace());
       void loadProjects();
     }
+    function onShellError(event: Event) {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      if (detail?.message) showShellError(detail.message);
+    }
     window.addEventListener(WORKSPACE_EVENT, onWorkspaceChange);
-    return () => window.removeEventListener(WORKSPACE_EVENT, onWorkspaceChange);
+    window.addEventListener("wa-shell-error", onShellError);
+    return () => {
+      window.removeEventListener(WORKSPACE_EVENT, onWorkspaceChange);
+      window.removeEventListener("wa-shell-error", onShellError);
+    };
   }, [loadProjects]);
 
   function toggleNav() {
@@ -97,14 +111,14 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       setActiveWorkspace(created);
       await loadProjects();
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "Could not create workspace");
+      showShellError(err instanceof Error ? err.message : "Could not create workspace");
     }
   }
 
   async function createProject() {
     const workspaceId = getActiveWorkspaceId();
     if (!workspaceId) {
-      window.alert("Select or create a workspace first.");
+      showShellError("Select or create a workspace first.");
       return;
     }
     const name = window.prompt("Project name?", "New strategy");
@@ -117,7 +131,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       setProjects((current) => [created, ...current]);
       router.push(`/projects/${created.id}`);
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "Could not create project");
+      showShellError(err instanceof Error ? err.message : "Could not create project");
     }
   }
 
@@ -137,7 +151,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       });
       setProjects((current) => current.map((item) => (item.id === projectId ? updated : item)));
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "Could not rename project");
+      showShellError(err instanceof Error ? err.message : "Could not rename project");
     }
   }
 
@@ -147,7 +161,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       setProjects((current) => [created, ...current]);
       router.push(`/projects/${created.id}`);
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "Could not duplicate project");
+      showShellError(err instanceof Error ? err.message : "Could not duplicate project");
     }
   }
 
@@ -161,7 +175,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         router.push(next ? `/projects/${next.id}` : "/");
       }
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "Could not delete project");
+      showShellError(err instanceof Error ? err.message : "Could not delete project");
     }
   }
 
@@ -328,7 +342,17 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           </div>
         ) : null}
       </aside>
-      <main className="min-h-0 min-w-0 flex-1 overflow-hidden">{children}</main>
+      <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+        {shellError ? (
+          <div className="absolute inset-x-0 top-0 z-50 flex items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
+            <span>{shellError}</span>
+            <button type="button" onClick={() => setShellError(null)} className="shrink-0 text-red-600 hover:underline">
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+        {children}
+      </main>
     </div>
   );
 }

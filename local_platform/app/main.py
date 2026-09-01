@@ -11,13 +11,15 @@ from typing import Optional
 from urllib.parse import unquote
 
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy import String, and_, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
+import logging
 
 _LOCAL_PLATFORM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _LOCAL_PLATFORM not in sys.path:
@@ -67,6 +69,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+logger = logging.getLogger("wa.api")
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(_request: Request, exc: IntegrityError):
+    message = str(exc.orig) if getattr(exc, "orig", None) else str(exc)
+    if "project_canvas.project_id" in message or "project_canvas" in message:
+        detail = "This project cannot add another canvas until the database migration finishes. Restart the API or contact support."
+        return JSONResponse(status_code=409, content={"detail": detail})
+    return JSONResponse(status_code=409, content={"detail": "That record already exists or conflicts with existing data."})
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s", request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Something went wrong on the server. Please try again."},
+    )
 
 
 class LoginBody(BaseModel):

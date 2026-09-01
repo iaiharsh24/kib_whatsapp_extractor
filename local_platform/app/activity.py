@@ -16,20 +16,24 @@ def log_activity(
     resource_name: str | None = None,
     workspace_id: str | None = None,
     details: dict | None = None,
-) -> ActivityLog:
-    row = ActivityLog(
-        user_id=user.id if user else None,
-        username=(user.email or user.username) if user else "system",
-        user_role=user.role if user else None,
-        action=action,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        resource_name=resource_name,
-        workspace_id=workspace_id,
-        details=details or {},
-    )
-    db.add(row)
-    return row
+) -> ActivityLog | None:
+    try:
+        row = ActivityLog(
+            user_id=user.id if user else None,
+            username=(user.email or user.username) if user else "system",
+            user_role=user.role if user else None,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            resource_name=resource_name,
+            workspace_id=workspace_id,
+            details=details or {},
+        )
+        db.add(row)
+        return row
+    except Exception as exc:
+        print(f"[activity] could not log {action}: {exc}")
+        return None
 
 
 def serialize_activity_log(row: ActivityLog) -> dict:

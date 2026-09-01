@@ -118,8 +118,73 @@ def _ensure_columns():
             if "workspace_id" not in project_names:
                 conn.execute(text("ALTER TABLE projects ADD COLUMN workspace_id VARCHAR"))
 
+    _migrate_project_canvas_multi()
     _ensure_message_hash_index()
     _migrate_project_data()
+
+
+def _project_canvas_has_unique_project_id(conn) -> bool:
+    if DB_BACKEND == "sqlite":
+        row = conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='project_canvas'")).fetchone()
+        if not row or not row[0]:
+            return False
+        ddl = str(row[0])
+        return "UNIQUE (project_id)" in ddl or "UNIQUE(project_id)" in ddl
+
+    uniques = inspect(conn).get_unique_constraints("project_canvas")
+    return any(set(item.get("column_names") or []) == {"project_id"} for item in uniques)
+
+
+def _migrate_project_canvas_multi():
+    """Allow multiple canvases per project (drop legacy UNIQUE(project_id))."""
+    inspector = inspect(engine)
+    if "project_canvas" not in inspector.get_table_names():
+        return
+
+    with engine.begin() as conn:
+        if not _project_canvas_has_unique_project_id(conn):
+            return
+
+        print("[db] Migrating project_canvas: removing UNIQUE(project_id) for multi-canvas support")
+        if DB_BACKEND == "sqlite":
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE project_canvas_new (
+                        id VARCHAR NOT NULL PRIMARY KEY,
+                        project_id VARCHAR NOT NULL,
+                        name VARCHAR NOT NULL DEFAULT 'Main canvas',
+                        nodes JSON NOT NULL,
+                        edges JSON NOT NULL,
+                        frames JSON NOT NULL,
+                        viewport JSON,
+                        created_at DATETIME,
+                        FOREIGN KEY(project_id) REFERENCES projects (id)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO project_canvas_new (id, project_id, name, nodes, edges, frames, viewport, created_at)
+                    SELECT id, project_id, COALESCE(name, 'Main canvas'), nodes, edges, frames, viewport, created_at
+                    FROM project_canvas
+                    """
+                )
+            )
+            conn.execute(text("DROP TABLE project_canvas"))
+            conn.execute(text("ALTER TABLE project_canvas_new RENAME TO project_canvas"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_project_canvas_project_id ON project_canvas (project_id)"))
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+        else:
+            for item in inspect(conn).get_unique_constraints("project_canvas"):
+                if set(item.get("column_names") or []) == {"project_id"}:
+                    name = item.get("name")
+                    if name:
+                        conn.execute(text(f'ALTER TABLE project_canvas DROP CONSTRAINT IF EXISTS "{name}"'))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_project_canvas_project_id ON project_canvas (project_id)"))
 
 
 def _migrate_project_data():
