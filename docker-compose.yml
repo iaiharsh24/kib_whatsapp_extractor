@@ -5,6 +5,9 @@ services:
     environment:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       WA_DATA_DB_PATH: /app/local_data/strategy.db
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
     volumes:
       - app_data:/app/local_data
     restart: unless-stopped

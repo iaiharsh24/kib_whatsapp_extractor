@@ -80,21 +80,30 @@ def _ensure_columns():
 def seed_local_defaults():
     from app.auth import hash_password
 
+    admin_email = (os.getenv("ADMIN_EMAIL") or "admin@local").strip().lower()
+    admin_password = os.getenv("ADMIN_PASSWORD") or "admin123"
+    admin_username = (os.getenv("ADMIN_USERNAME") or admin_email.split("@")[0] or "admin").strip()
+
     db = SessionLocal()
     try:
         admin = db.query(User).filter(User.username == "admin").first()
         if not admin:
+            admin = db.query(User).filter(User.email == admin_email).first()
+        if not admin:
             admin = User(
                 id="user_admin",
-                username="admin",
-                email="admin@local",
-                password_hash=hash_password("admin123"),
+                username=admin_username,
+                email=admin_email,
+                password_hash=hash_password(admin_password),
                 role="admin",
             )
             db.add(admin)
             db.commit()
-        elif not admin.email:
-            admin.email = "admin@local"
+        else:
+            if not admin.email:
+                admin.email = admin_email
+            if admin_username and admin.username != admin_username:
+                admin.username = admin_username
             db.commit()
 
         if not db.query(Project).first():
