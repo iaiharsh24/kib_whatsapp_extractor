@@ -29,8 +29,8 @@ if ! grep -q '^POSTGRES_USER=' .env; then
 fi
 
 git pull --ff-only
-docker compose build
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml build
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 docker compose ps
 
 echo ""

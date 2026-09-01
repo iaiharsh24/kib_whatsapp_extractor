@@ -13,7 +13,13 @@ DB_PATH = os.getenv(
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
 if DATABASE_URL:
-    engine = create_engine(DATABASE_URL, echo=False, future=True, pool_pre_ping=True)
+    engine = create_engine(
+        DATABASE_URL,
+        echo=False,
+        future=True,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 5},
+    )
     DB_BACKEND = "postgresql"
 else:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -36,6 +42,24 @@ if DB_BACKEND == "sqlite":
     event.listen(engine, "connect", _enable_sqlite_foreign_keys)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def wait_for_database(max_attempts: int = 15, delay_seconds: float = 2.0) -> None:
+    if DB_BACKEND == "sqlite":
+        return
+    import time
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return
+        except Exception as exc:
+            last_error = exc
+            print(f"Database not ready (attempt {attempt}/{max_attempts}): {exc}")
+            time.sleep(delay_seconds)
+    raise RuntimeError(f"Database unavailable after {max_attempts} attempts") from last_error
 
 
 def get_db():
@@ -127,6 +151,7 @@ def _ensure_message_hash_index():
 
 
 def create_tables():
+    wait_for_database()
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     location = DATABASE_URL.split("@")[-1] if DATABASE_URL else DB_PATH

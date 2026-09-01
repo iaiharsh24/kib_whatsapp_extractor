@@ -66,12 +66,12 @@ EOF
 chmod 600 .env
 
 echo "==> Building and starting containers..."
-docker compose build
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml build
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 
 echo "==> Waiting for API..."
 for i in $(seq 1 30); do
-  if docker compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" >/dev/null 2>&1; then
+  if docker compose -f docker-compose.yml -f docker-compose.postgres.yml exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" >/dev/null 2>&1; then
     break
   fi
   sleep 2

@@ -437,17 +437,24 @@ async def health():
 
 @app.post("/api/auth/login")
 async def login(body: LoginBody, db: Session = Depends(get_db)):
-    identifier = (body.email or "").strip()
-    user = (
-        db.query(User)
-        .filter(or_(User.email == identifier, User.username == identifier))
-        .first()
-    )
-    if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    ensure_personal_workspace(db, user)
-    db.commit()
-    return {"token": make_token(user), "user": serialize_user(user)}
+    try:
+        identifier = (body.email or "").strip()
+        user = (
+            db.query(User)
+            .filter(or_(User.email == identifier, User.username == identifier))
+            .first()
+        )
+        if not user or not verify_password(body.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        ensure_personal_workspace(db, user)
+        db.commit()
+        return {"token": make_token(user), "user": serialize_user(user)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        print(f"Login failed: {exc}")
+        raise HTTPException(status_code=503, detail="Server is starting up. Please try again in a few seconds.")
 
 
 @app.get("/api/auth/signup/{code}")

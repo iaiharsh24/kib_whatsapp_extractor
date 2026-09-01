@@ -1,34 +1,16 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-whatsapp}
-      POSTGRES_USER: ${POSTGRES_USER:-whatsapp}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whatsapp} -d ${POSTGRES_DB:-whatsapp}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   api:
     build:
       context: ./local_platform
     environment:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-whatsapp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-whatsapp}
       WA_DATA_DB_PATH: /app/local_data/strategy.db
+      DATABASE_URL: ${DATABASE_URL:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
     volumes:
       - app_data:/app/local_data
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
@@ -66,6 +48,5 @@ services:
 
 volumes:
   app_data:
-  postgres_data:
   caddy_data:
   caddy_config:
