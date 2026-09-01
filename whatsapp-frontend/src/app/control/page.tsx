@@ -7,12 +7,50 @@ import ControlDataTables from "@/components/ControlDataTables";
 import { api, downloadAuthenticated, formatWhen, getUser } from "@/lib/api";
 import { refreshWorkspaces, setActiveWorkspaceId } from "@/lib/workspace";
 import type {
+  BackupStatus,
   ControlOverview,
   ControlUserRow,
   DbOverview,
   DbSnapshotRecord,
   DbSnapshotResponse,
 } from "@/lib/types";
+
+function formatAge(seconds: number | null): string {
+  if (seconds === null) return "never";
+  if (seconds < 90) return `${seconds}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} min ago`;
+  return `${Math.round(seconds / 3600)} h ago`;
+}
+
+function BackupBanner({ status }: { status: BackupStatus }) {
+  const ok = status.healthy;
+  return (
+    <div
+      className={`mt-6 rounded-xl border p-4 ${
+        ok ? "border-emerald-200 bg-emerald-50" : "border-red-300 bg-red-50"
+      }`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className={`text-sm font-semibold ${ok ? "text-emerald-900" : "text-red-900"}`}>
+            {ok ? "Backups healthy" : "Backups are NOT running"}
+          </p>
+          <p className={`mt-0.5 text-xs ${ok ? "text-emerald-800" : "text-red-800"}`}>
+            Last successful backup {formatAge(status.last_success_age_seconds)}
+            {status.last_success_file ? ` · ${status.last_success_file}` : ""} · every{" "}
+            {Math.round(status.interval_seconds / 60)} min · stored at {status.directory}
+          </p>
+          {status.last_error ? (
+            <p className="mt-1 text-xs text-red-900">
+              Last error: {status.last_error}
+              {status.consecutive_failures > 1 ? ` (${status.consecutive_failures} in a row)` : ""}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function formatBytes(bytes: number): string {
   if (!bytes) return "0 B";
@@ -167,6 +205,7 @@ export default function ControlPage() {
   const [dbOverview, setDbOverview] = useState<DbOverview | null>(null);
   const [snapshots, setSnapshots] = useState<DbSnapshotRecord[]>([]);
   const [snapshotTotal, setSnapshotTotal] = useState(0);
+  const [backups, setBackups] = useState<BackupStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState<string | null>(null);
@@ -175,15 +214,17 @@ export default function ControlPage() {
   const [mainTab, setMainTab] = useState<"overview" | "tables" | "backups">("tables");
 
   async function load() {
-    const [nextControl, nextDb, nextSnapshots] = await Promise.all([
+    const [nextControl, nextDb, nextSnapshots, nextBackups] = await Promise.all([
       api<ControlOverview>("/api/admin/control/overview"),
       api<DbOverview>("/api/admin/db/overview"),
       api<DbSnapshotResponse>("/api/admin/db/snapshots?limit=100"),
+      api<BackupStatus>("/api/admin/db/backup-status"),
     ]);
     setControl(nextControl);
     setDbOverview(nextDb);
     setSnapshots(nextSnapshots.items);
     setSnapshotTotal(nextSnapshots.total);
+    setBackups(nextBackups);
   }
 
   useEffect(() => {
@@ -262,6 +303,8 @@ export default function ControlPage() {
           {busy ? "Snapshotting…" : "Snapshot entire database"}
         </button>
       </div>
+
+      {backups ? <BackupBanner status={backups} /> : null}
 
       <section className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">Platform totals</h3>

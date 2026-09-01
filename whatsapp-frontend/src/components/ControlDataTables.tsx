@@ -49,12 +49,24 @@ function TableShell({
   );
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children }: { children?: React.ReactNode }) {
   return <th className="sticky top-0 bg-zinc-50 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{children}</th>;
 }
 
-function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <td className={`border-t border-zinc-100 px-3 py-2 align-top text-xs text-zinc-700 ${className}`}>{children}</td>;
+function Td({
+  children,
+  className = "",
+  title,
+}: {
+  children?: React.ReactNode;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <td title={title} className={`border-t border-zinc-100 px-3 py-2 align-top text-xs text-zinc-700 ${className}`}>
+      {children}
+    </td>
+  );
 }
 
 export default function ControlDataTables() {

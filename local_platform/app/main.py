@@ -43,7 +43,15 @@ from app.auth import (
     visible_users_for_admin,
 )
 from app.admin_control import build_control_overview, build_control_tables, export_user_backup_json
-from app.backups import run_backup, serialize_snapshot, start_backup_scheduler
+from app.backups import (
+    REQUIRE_BACKUP_BEFORE_DELETE,
+    BackupError,
+    backup_status,
+    run_backup,
+    serialize_snapshot,
+    snapshot_before_destructive,
+    start_backup_scheduler,
+)
 from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
 from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
@@ -87,6 +95,26 @@ app.add_middleware(
 )
 
 logger = logging.getLogger("wa.api")
+
+
+def guard_destructive(action: str, actor: User) -> None:
+    """Ensure a restorable snapshot exists before an irreversible delete.
+
+    Blocks the delete when no backup can be produced, so the platform can never
+    lose rows that were never captured.
+    """
+    try:
+        snapshot_before_destructive(action, getattr(actor, "email", None) or getattr(actor, "username", None))
+    except BackupError as exc:
+        logger.error("pre-delete backup failed for %s: %s", action, exc)
+        if REQUIRE_BACKUP_BEFORE_DELETE:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Delete blocked: the safety backup could not be created, so this "
+                    f"change would be unrecoverable. ({exc})"
+                ),
+            ) from exc
 
 
 @app.exception_handler(IntegrityError)
@@ -510,12 +538,14 @@ async def startup():
 
 @app.get("/health")
 async def health():
+    backups = backup_status()
     return {
-        "status": "healthy",
+        "status": "healthy" if backups["healthy"] else "degraded",
         "mode": "local",
         "db": DB_BACKEND,
         "db_path": DB_PATH if DB_BACKEND == "sqlite" else None,
         "database_url": DATABASE_URL.split("@")[-1] if DATABASE_URL else None,
+        "backups": backups,
     }
 
 
@@ -774,6 +804,7 @@ async def delete_workspace(workspace_id: str, db: Session = Depends(get_db), use
     if member_workspaces <= 1:
         raise HTTPException(status_code=400, detail="You must keep at least one workspace")
     workspace_name_value = workspace.name
+    guard_destructive(f"workspace delete ({workspace_name_value})", user)
     upload_ids = [row[0] for row in db.query(Upload.id).filter(Upload.workspace_id == workspace_id).all()]
     log_activity(
         db,
@@ -1644,6 +1675,7 @@ async def delete_upload(
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
     file_name = upload.file_name
+    guard_destructive(f"upload delete ({file_name})", admin)
     log_activity(
         db,
         admin,
@@ -1776,6 +1808,7 @@ async def delete_project(project_id: str, db: Session = Depends(get_db), user: U
     project = require_project_access(project_id, user, db)
     project_name = project.name
     ws_id = project.workspace_id
+    guard_destructive(f"project delete ({project_name})", user)
     db.query(ProjectItem).filter(ProjectItem.project_id == project_id).delete()
     db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).delete()
     log_activity(
@@ -2212,7 +2245,10 @@ async def create_db_snapshot(
     db: Session = Depends(get_db),
     admin: User = Depends(require_super_admin),
 ):
-    snapshot = run_backup(kind="manual", notes=f"Triggered by {admin.email or admin.username}")
+    try:
+        snapshot = run_backup(kind="manual", notes=f"Triggered by {admin.email or admin.username}")
+    except BackupError as exc:
+        raise HTTPException(status_code=503, detail=f"Backup failed: {exc}") from exc
     log_activity(
         db,
         admin,
@@ -2224,6 +2260,11 @@ async def create_db_snapshot(
     )
     db.commit()
     return serialize_snapshot(snapshot)
+
+
+@app.get("/api/admin/db/backup-status")
+async def get_backup_status(admin: User = Depends(require_super_admin)):
+    return backup_status()
 
 
 @app.get("/api/admin/db/snapshots/{snapshot_id}/download")
@@ -2251,6 +2292,12 @@ async def delete_db_snapshot(
     snapshot = db.query(DbSnapshot).filter(DbSnapshot.id == snapshot_id).first()
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+    newest = db.query(DbSnapshot).order_by(DbSnapshot.created_at.desc()).first()
+    if newest and newest.id == snapshot.id:
+        raise HTTPException(
+            status_code=400,
+            detail="The most recent snapshot cannot be deleted — it is the current restore point.",
+        )
     try:
         if os.path.isfile(snapshot.file_path):
             os.remove(snapshot.file_path)
@@ -2436,6 +2483,7 @@ async def remove_user(user_id: str, db: Session = Depends(get_db), admin: User =
     if is_super_admin(user):
         raise HTTPException(status_code=400, detail="This account cannot be removed")
     removed_name = user.email or user.username
+    guard_destructive(f"user delete ({removed_name})", admin)
     log_activity(
         db,
         admin,

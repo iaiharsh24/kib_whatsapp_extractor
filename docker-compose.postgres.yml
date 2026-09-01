@@ -23,5 +23,12 @@ services:
       postgres:
         condition: service_healthy
 
+# Declared external so `docker compose down -v` refuses to delete them. Both are
+# created by deploy/upgrade-postgres.sh and deploy/vps-install.sh.
 volumes:
   postgres_data:
+    external: true
+    name: ${POSTGRES_VOLUME_NAME:-kib_whatsapp_extractor_postgres_data}
+  app_data:
+    external: true
+    name: ${APP_DATA_VOLUME_NAME:-kib_whatsapp_extractor_app_data}

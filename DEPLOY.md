@@ -185,12 +185,70 @@ git pull
 chmod +x deploy/upgrade-postgres.sh
 ./deploy/upgrade-postgres.sh
 
-# Backup PostgreSQL + uploads (run on VPS)
-docker compose exec -T postgres pg_dump -U whatsapp whatsapp > db-backup-$(date +%F).sql
-docker compose exec api tar -czf - -C /app local_data > files-backup-$(date +%F).tar.gz
+# Ad-hoc dump (the app also does this hourly by itself)
+docker compose exec -T postgres pg_dump -U whatsapp whatsapp | gzip > db-$(date +%F).sql.gz
 ```
 
 Enable **daily** backups in hPanel: VPS → Backups → Backup schedule → Daily.
+
+## 7a. Data safety
+
+Production data lives in two Docker volumes, both declared `external` so
+`docker compose down -v` cannot delete them:
+
+| Volume | Contents |
+|--------|----------|
+| `kib_whatsapp_extractor_postgres_data` | users, workspaces, projects, canvases, messages |
+| `kib_whatsapp_extractor_app_data` | uploaded zips and extracted media |
+
+Backups are written to `$BACKUP_HOST_DIR` (default `/var/backups/kib_whatsapp`),
+a **host directory outside both volumes**, so losing the volumes does not lose
+the backups:
+
+```
+/var/backups/kib_whatsapp/
+├── db/     hourly gzipped pg_dump, verified for the completion marker
+└── files/  append-only mirror of uploads/ and extracted/
+```
+
+- **Retention:** every dump for 48 h, then one per day for 30 days, one per week
+  for 26 weeks. Manual and pre-delete dumps are kept 30 days regardless.
+- **The media mirror never deletes.** Removing an upload through the UI leaves
+  its files recoverable in `files/`.
+- **Deletes are gated.** Deleting a user, workspace, project, or upload first
+  forces a fresh dump; if the dump fails the API returns 503 and the delete is
+  refused. Set `WA_REQUIRE_BACKUP_BEFORE_DELETE=0` to relax this.
+- **The newest snapshot cannot be deleted** through the API.
+- **Nothing outside the app can reach the database.** Postgres publishes no host
+  port — only Caddy (80/443) and SSH are listening.
+
+Check backup health at any time:
+
+```bash
+curl -s https://app.kibookal.tech/health | python3 -m json.tool
+```
+
+`"status": "degraded"` means backups are failing. The same banner is shown at the
+top of the super-admin **Control** page.
+
+### Restore
+
+```bash
+ls -lh /var/backups/kib_whatsapp/db
+./deploy/restore-postgres.sh /var/backups/kib_whatsapp/db/snapshot_20260901_120000_scheduled.sql.gz
+```
+
+The script dumps the current state to `prerestore_*.sql.gz` before overwriting,
+so a mistaken restore is itself reversible.
+
+### Off-server copies
+
+The VPS is still a single point of failure. Keep hPanel VPS backups on **Daily**,
+and pull a copy down periodically:
+
+```bash
+scp -r root@194.238.19.67:/var/backups/kib_whatsapp/db ./offsite-backups/
+```
 
 ## 8. Firewall
 

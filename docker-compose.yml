@@ -10,14 +10,19 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       SUPER_ADMIN_EMAILS: ${SUPER_ADMIN_EMAILS:-harsh.jaiswal@anibrain.com}
-      WA_BACKUP_DIR: ${WA_BACKUP_DIR:-/app/local_data/backups}
-      WA_BACKUP_INTERVAL_SECONDS: ${WA_BACKUP_INTERVAL_SECONDS:-21600}
+      WA_DATA_DIR: /app/local_data
+      WA_BACKUP_DIR: /app/backups
+      WA_BACKUP_INTERVAL_SECONDS: ${WA_BACKUP_INTERVAL_SECONDS:-3600}
+      WA_BACKUP_MIRROR_FILES: ${WA_BACKUP_MIRROR_FILES:-1}
+      WA_REQUIRE_BACKUP_BEFORE_DELETE: ${WA_REQUIRE_BACKUP_BEFORE_DELETE:-1}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemma-4-31b-it:free}
       OPENROUTER_APP_NAME: ${OPENROUTER_APP_NAME:-WhatsApp Strategy Canvas}
       OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-}
     volumes:
       - app_data:/app/local_data
+      # Host bind-mount: backups must outlive the Docker volumes they protect.
+      - ${BACKUP_HOST_DIR:-./backups}:/app/backups
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]

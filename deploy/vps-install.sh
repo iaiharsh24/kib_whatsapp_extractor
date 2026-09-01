@@ -51,6 +51,8 @@ else
 fi
 cd "$APP_DIR"
 
+BACKUP_HOST_DIR="${BACKUP_HOST_DIR:-/var/backups/kib_whatsapp}"
+
 echo "==> Writing .env (secrets stay on this server only)..."
 cat > .env <<EOF
 APP_DOMAIN=$APP_DOMAIN
@@ -62,8 +64,18 @@ POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 ADMIN_EMAIL=$ADMIN_EMAIL
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 ADMIN_USERNAME=$ADMIN_USERNAME
+BACKUP_HOST_DIR=$BACKUP_HOST_DIR
 EOF
 chmod 600 .env
+
+echo "==> Preparing backup directory outside Docker volumes..."
+mkdir -p "$BACKUP_HOST_DIR/db" "$BACKUP_HOST_DIR/files"
+chmod 700 "$BACKUP_HOST_DIR"
+
+# External volumes survive `docker compose down -v`.
+echo "==> Ensuring data volumes exist..."
+docker volume create kib_whatsapp_extractor_postgres_data >/dev/null
+docker volume create kib_whatsapp_extractor_app_data >/dev/null
 
 echo "==> Building and starting containers..."
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml build
@@ -95,5 +107,6 @@ if [ "${GENERATED_DB_PASSWORD:-0}" = "1" ]; then
 fi
 echo " Files:    Docker volume app_data -> uploads + extracted media"
 echo " Logs:     docker compose logs -f"
-echo " Backup:   docker compose exec api tar -czf - -C /app local_data > backup.tar.gz"
+echo " Backups:  $BACKUP_HOST_DIR (hourly DB dumps + append-only media mirror)"
+echo " Restore:  ./deploy/restore-postgres.sh <dump.sql.gz>"
 echo "=============================================="

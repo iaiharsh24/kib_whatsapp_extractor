@@ -245,6 +245,18 @@ export type DbSnapshotResponse = {
   items: DbSnapshotRecord[];
 };
 
+export type BackupStatus = {
+  healthy: boolean;
+  directory: string;
+  interval_seconds: number;
+  last_success_at: string | null;
+  last_success_file: string | null;
+  last_success_age_seconds: number | null;
+  last_error: string | null;
+  last_error_at: string | null;
+  consecutive_failures: number;
+};
+
 export type DbUploadSummary = {
   id: string;
   file_name: string;
