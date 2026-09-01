@@ -53,6 +53,7 @@ from app.backups import (
     start_backup_scheduler,
 )
 from app.rate_limit import client_key, login_limiter, signup_limiter
+from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
 from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
 from app.vectors import delete_upload_vectors
