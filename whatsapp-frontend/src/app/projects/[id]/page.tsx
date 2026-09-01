@@ -33,8 +33,17 @@ export default function ProjectPage() {
   );
 
   useEffect(() => {
-    void loadPreferences().then(() => setLibraryOpen(getPreference<boolean>("library_collapsed", false) !== true));
+    void loadPreferences().then(() => {
+      const collapsed = getPreference<boolean>("library_collapsed", false) === true;
+      setLibraryOpen(!collapsed);
+    });
   }, []);
+
+  useEffect(() => {
+    if (detail?.uploads?.length) {
+      setLibraryOpen(true);
+    }
+  }, [detail?.uploads?.length]);
 
   useEffect(() => {
     void loadWorkspaces().catch(() => undefined);

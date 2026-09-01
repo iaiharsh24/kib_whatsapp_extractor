@@ -10,12 +10,7 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
-
-if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+if ! grep -q '^POSTGRES_PASSWORD=.' .env; then
   POSTGRES_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)"
   echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" >> .env
   echo "Added POSTGRES_PASSWORD to .env (save it): $POSTGRES_PASSWORD"

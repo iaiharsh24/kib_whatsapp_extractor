@@ -19,10 +19,11 @@ import type {
 } from "@/lib/types";
 
 const LIB_TABS = [
+  { id: "all", label: "All" },
+  { id: "chat", label: "Chats" },
   { id: "image", label: "Images" },
   { id: "reel", label: "Reels" },
   { id: "link", label: "Links" },
-  { id: "all", label: "All" },
 ] as const;
 
 type LibTab = (typeof LIB_TABS)[number]["id"];
@@ -30,10 +31,25 @@ type LibTab = (typeof LIB_TABS)[number]["id"];
 function tabCount(summary: UploadLibrarySummary | null, tab: LibTab, total: number): number {
   if (!summary) return total;
   if (tab === "all") return summary.counts.total;
+  if (tab === "chat") return summary.counts.chat;
   if (tab === "image") return summary.counts.image;
   if (tab === "reel") return summary.counts.reel;
   if (tab === "link") return summary.counts.link;
   return total;
+}
+
+function fallbackSummaries(uploads: UploadRecord[]): UploadLibrarySummary[] {
+  return uploads.map((upload) => ({
+    upload,
+    counts: {
+      chat: upload.message_count || 0,
+      link: 0,
+      document: 0,
+      image: 0,
+      reel: 0,
+      total: upload.message_count || 0,
+    },
+  }));
 }
 
 function MediaList({
@@ -48,7 +64,11 @@ function MediaList({
   if (items.length === 0) {
     return (
       <p className="px-1 py-6 text-center text-xs text-zinc-500">
-        No media in this category for the selected zip.
+        {libTab === "all"
+          ? "No messages yet. Upload a WhatsApp export zip using Add zip above."
+          : libTab === "chat"
+            ? "No chat messages in this zip. Try the All tab or another zip."
+            : "Nothing in this category for the selected zip. Try All or Chats."}
       </p>
     );
   }
@@ -132,7 +152,8 @@ export default function ProjectLibraryPanel({
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [library, setLibrary] = useState<MessageRecord[]>([]);
   const [libraryTotal, setLibraryTotal] = useState(0);
-  const [libTab, setLibTab] = useState<LibTab>("image");
+  const [libTab, setLibTab] = useState<LibTab>("all");
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filters, setFilters] = useState<LibraryFilterState>(EMPTY_LIBRARY_FILTERS);
   const [filterOptions, setFilterOptions] = useState<LibraryFilterOptions>({
     senders: [],
@@ -144,23 +165,42 @@ export default function ProjectLibraryPanel({
   const selectedSummary = summaries.find((row) => row.upload.id === selectedUploadId) ?? null;
 
   const loadSummaries = useCallback(async () => {
-    const rows = await api<UploadLibrarySummary[]>(`/api/projects/${projectId}/library/uploads`);
-    setSummaries(rows);
-  }, [projectId]);
+    try {
+      const rows = await api<UploadLibrarySummary[]>(`/api/projects/${projectId}/library/uploads`);
+      setSummaries(rows);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not load zip summaries");
+      setSummaries((current) => (current.length ? current : fallbackSummaries(uploads)));
+    }
+  }, [projectId, uploads]);
 
   const loadLibrary = useCallback(async () => {
-    const params = libraryQuery(projectId, libTab, filters, {
-      uploadId: selectedUploadId,
-      limit: 60,
-    });
-    const lib = await api<LibraryResponse>(`/api/library?${params.toString()}`);
-    setLibrary(lib.items);
-    setLibraryTotal(lib.total);
+    try {
+      const params = libraryQuery(projectId, libTab, filters, {
+        uploadId: selectedUploadId,
+        limit: 60,
+      });
+      const lib = await api<LibraryResponse>(`/api/library?${params.toString()}`);
+      setLibrary(lib.items);
+      setLibraryTotal(lib.total);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not load library");
+      setLibrary([]);
+      setLibraryTotal(0);
+    }
   }, [projectId, libTab, filters, selectedUploadId]);
 
   useEffect(() => {
-    void loadSummaries().catch(() => undefined);
+    void loadSummaries();
   }, [loadSummaries, uploads]);
+
+  useEffect(() => {
+    if (summaries.length === 0 && uploads.length > 0) {
+      setSummaries(fallbackSummaries(uploads));
+    }
+  }, [uploads, summaries.length]);
 
   useEffect(() => {
     void api<LibraryFilterOptions>(`/api/library/filters?project_id=${encodeURIComponent(projectId)}`)
@@ -194,17 +234,21 @@ export default function ProjectLibraryPanel({
   }, []);
 
   const totalAll = summaries.reduce((sum, row) => sum + row.counts.total, 0);
+  const zipCount = summaries.length || uploads.length;
 
   if (collapsed) {
     return (
-      <aside className="flex w-10 shrink-0 flex-col overflow-hidden border-r border-zinc-200 bg-white">
+      <aside className="flex w-12 shrink-0 flex-col overflow-hidden border-r border-emerald-200 bg-emerald-50/40">
         <button
           type="button"
           onClick={onToggleCollapsed}
-          className="flex flex-1 items-center justify-center border-b border-zinc-200 py-3 text-[11px] uppercase tracking-wide text-zinc-500 hover:bg-zinc-50"
+          className="flex flex-1 flex-col items-center justify-center gap-2 border-b border-emerald-200 py-4 text-[10px] font-semibold uppercase tracking-wide text-emerald-800 hover:bg-emerald-100/60"
           title="Expand media library"
         >
-          <span className="rotate-90 whitespace-nowrap">Media</span>
+          <span className="rotate-90 whitespace-nowrap">Library</span>
+          {zipCount > 0 ? (
+            <span className="rounded-full bg-emerald-700 px-1.5 py-0.5 text-[9px] text-white">{zipCount}</span>
+          ) : null}
         </button>
       </aside>
     );
@@ -226,9 +270,13 @@ export default function ProjectLibraryPanel({
         </span>
       </button>
 
+      {loadError ? (
+        <p className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{loadError}</p>
+      ) : null}
+
       <div className="border-b border-zinc-200 px-3 py-2">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-xs font-medium text-zinc-700">Zip files ({summaries.length})</p>
+          <p className="text-xs font-medium text-zinc-700">Zip files ({zipCount})</p>
           <label className="cursor-pointer rounded-md bg-emerald-700 px-2 py-1 text-xs text-white hover:bg-emerald-800">
             {uploading ? "Uploading…" : "Add zip"}
             <input
