@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
+from app.activity import log_activity
 from app.parser import classify_message, iter_messages
 from app.previews import fetch_preview, instant_preview, is_fetchable_url, normalize_urls, primary_url
 from app.vectors import upsert_messages
@@ -19,7 +20,7 @@ from app.zip_extract import (
     looks_like_zip,
 )
 from db import SessionLocal, engine
-from db.models import Message, Upload, new_id
+from db.models import Message, Project, Upload, User, Workspace, new_id
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -69,8 +70,8 @@ def _attach_local_file(parsed: dict, upload_id: str, media_index: dict[str, Path
     return parsed
 
 
-def _existing_hashes(db, workspace_id: str | None, hashes: list[str]) -> set[str]:
-    if not workspace_id or not hashes:
+def _existing_hashes(db, project_id: str | None, hashes: list[str]) -> set[str]:
+    if not project_id or not hashes:
         return set()
     found: set[str] = set()
     for index in range(0, len(hashes), 400):
@@ -78,7 +79,7 @@ def _existing_hashes(db, workspace_id: str | None, hashes: list[str]) -> set[str
         found.update(
             item[0]
             for item in db.query(Message.content_hash)
-            .filter(Message.workspace_id == workspace_id, Message.content_hash.in_(chunk))
+            .filter(Message.project_id == project_id, Message.content_hash.in_(chunk))
             .all()
         )
     return found
@@ -88,18 +89,18 @@ def _insert_messages_ignore(db, rows: list[dict]) -> None:
     if not rows:
         return
     if engine.dialect.name == "postgresql":
-        stmt = pg_insert(Message).on_conflict_do_nothing(constraint="uq_message_workspace_hash")
+        stmt = pg_insert(Message).on_conflict_do_nothing(constraint="uq_message_project_hash")
     else:
-        stmt = sqlite_insert(Message).on_conflict_do_nothing(index_elements=["workspace_id", "content_hash"])
+        stmt = sqlite_insert(Message).on_conflict_do_nothing(index_elements=["project_id", "content_hash"])
     db.execute(stmt, rows)
 
 
 def _flush(db, batch: list[dict]) -> tuple[int, int]:
-    """Insert new rows, skipping duplicates by workspace + content hash."""
+    """Insert new rows, skipping duplicates by project + content hash."""
     total = len(batch)
     unique: dict[str, dict] = {}
     for row in batch:
-        if not row.get("workspace_id"):
+        if not row.get("project_id"):
             continue
         unique[row["content_hash"]] = row
     rows = []
@@ -109,8 +110,8 @@ def _flush(db, batch: list[dict]) -> tuple[int, int]:
         rows.append(payload)
     if not rows:
         return 0, total
-    workspace_id = rows[0]["workspace_id"]
-    existing = _existing_hashes(db, workspace_id, [row["content_hash"] for row in rows])
+    project_id = rows[0]["project_id"]
+    existing = _existing_hashes(db, project_id, [row["content_hash"] for row in rows])
     new_rows = [row for row in rows if row["content_hash"] not in existing]
     if not new_rows:
         return 0, total
@@ -121,17 +122,18 @@ def _flush(db, batch: list[dict]) -> tuple[int, int]:
     for index in range(0, len(hashes), 400):
         inserted.extend(
             db.query(Message)
-            .filter(Message.workspace_id == workspace_id, Message.content_hash.in_(hashes[index : index + 400]))
+            .filter(Message.project_id == project_id, Message.content_hash.in_(hashes[index : index + 400]))
             .all()
         )
     upsert_messages(inserted)
     return len(new_rows), total - len(new_rows)
 
 
-def _row(upload_id: str, workspace_id: str | None, parsed: dict, before: str, after: str) -> dict:
+def _row(upload_id: str, workspace_id: str | None, project_id: str | None, parsed: dict, before: str, after: str) -> dict:
     return {
         "upload_id": upload_id,
         "workspace_id": workspace_id,
+        "project_id": project_id,
         "sender": parsed["sender"],
         "timestamp": parsed["timestamp"],
         "raw_text": parsed["raw_text"],
@@ -148,7 +150,7 @@ def _row(upload_id: str, workspace_id: str | None, parsed: dict, before: str, af
 
 
 def _ingest_chat(
-    db, upload_id: str, workspace_id: str | None, txt_path: Path, media_index: dict[str, Path]
+    db, upload_id: str, workspace_id: str | None, project_id: str | None, txt_path: Path, media_index: dict[str, Path]
 ) -> tuple[str | None, int, int]:
     pending: list[dict] = []
     previous_text = ""
@@ -161,7 +163,7 @@ def _ingest_chat(
         parsed = _attach_local_file(parsed, upload_id, media_index)
         chat_name = parsed["chat_name"]
         if previous_parsed is not None:
-            pending.append(_row(upload_id, workspace_id, previous_parsed, previous_text, parsed["raw_text"]))
+            pending.append(_row(upload_id, workspace_id, project_id, previous_parsed, previous_text, parsed["raw_text"]))
             if len(pending) >= BATCH:
                 inserted, duplicates = _flush(db, pending)
                 inserted_total += inserted
@@ -171,11 +173,40 @@ def _ingest_chat(
         previous_parsed = parsed
 
     if previous_parsed is not None:
-        pending.append(_row(upload_id, workspace_id, previous_parsed, previous_text, ""))
+        pending.append(_row(upload_id, workspace_id, project_id, previous_parsed, previous_text, ""))
     inserted, duplicates = _flush(db, pending)
     inserted_total += inserted
     duplicate_total += duplicates
     return chat_name, inserted_total, duplicate_total
+
+
+def _log_upload_event(db, upload: Upload, action: str, extra: dict | None = None) -> None:
+    uploader = db.query(User).filter(User.id == upload.uploaded_by).first()
+    ws_name = None
+    if upload.workspace_id:
+        ws = db.query(Workspace).filter(Workspace.id == upload.workspace_id).first()
+        ws_name = ws.name if ws else None
+    project_name = None
+    if upload.project_id:
+        proj = db.query(Project).filter(Project.id == upload.project_id).first()
+        project_name = proj.name if proj else None
+    details = {
+        "workspace_name": ws_name,
+        "project_name": project_name,
+        "message_count": upload.message_count or 0,
+    }
+    if extra:
+        details.update(extra)
+    log_activity(
+        db,
+        uploader,
+        action,
+        resource_type="upload",
+        resource_id=upload.id,
+        resource_name=upload.file_name,
+        workspace_id=upload.workspace_id,
+        details=details,
+    )
 
 
 def process_upload(upload_id: str, saved_path: str) -> None:
@@ -199,6 +230,7 @@ def process_upload(upload_id: str, saved_path: str) -> None:
             if not chat_files:
                 upload.status = "failed"
                 upload.error_message = "No WhatsApp .txt chat export was found inside the zip."
+                _log_upload_event(db, upload, "upload.failed", {"error": upload.error_message})
                 db.commit()
                 return
 
@@ -208,7 +240,7 @@ def process_upload(upload_id: str, saved_path: str) -> None:
         names: list[str] = []
         duplicate_total = 0
         for chat_path in chat_files:
-            name, _inserted, duplicates = _ingest_chat(db, upload.id, upload.workspace_id, chat_path, media_index)
+            name, _inserted, duplicates = _ingest_chat(db, upload.id, upload.workspace_id, upload.project_id, chat_path, media_index)
             duplicate_total += duplicates
             if name:
                 names.append(name)
@@ -219,6 +251,7 @@ def process_upload(upload_id: str, saved_path: str) -> None:
         backfill_message_types(db, upload_id=upload.id)
         upload.status = "completed"
         upload.error_message = None
+        _log_upload_event(db, upload, "upload.completed")
         db.commit()
         threading.Thread(target=hydrate_link_previews, kwargs={"upload_id": upload.id}, daemon=True).start()
     except zipfile.BadZipFile:
@@ -227,6 +260,7 @@ def process_upload(upload_id: str, saved_path: str) -> None:
         if upload:
             upload.status = "failed"
             upload.error_message = "That file is not a valid zip archive."
+            _log_upload_event(db, upload, "upload.failed", {"error": upload.error_message})
             db.commit()
     except Exception as exc:
         db.rollback()
@@ -234,6 +268,7 @@ def process_upload(upload_id: str, saved_path: str) -> None:
         if upload:
             upload.status = "failed"
             upload.error_message = str(exc)
+            _log_upload_event(db, upload, "upload.failed", {"error": upload.error_message})
             db.commit()
     finally:
         db.close()

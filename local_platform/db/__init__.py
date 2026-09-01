@@ -87,11 +87,17 @@ def _ensure_columns():
                 conn.execute(text("ALTER TABLE messages ADD COLUMN link_preview JSON"))
             if "workspace_id" not in names:
                 conn.execute(text("ALTER TABLE messages ADD COLUMN workspace_id VARCHAR"))
+            if "project_id" not in names:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN project_id VARCHAR"))
 
         if "project_canvas" in existing_tables:
             canvas_names = _table_columns(conn, "project_canvas")
             if "viewport" not in canvas_names:
                 conn.execute(text("ALTER TABLE project_canvas ADD COLUMN viewport JSON"))
+            if "name" not in canvas_names:
+                conn.execute(text("ALTER TABLE project_canvas ADD COLUMN name VARCHAR DEFAULT 'Main canvas'"))
+            if "created_at" not in canvas_names:
+                conn.execute(text("ALTER TABLE project_canvas ADD COLUMN created_at DATETIME"))
 
         if "users" in existing_tables:
             user_names = _table_columns(conn, "users")
@@ -104,6 +110,8 @@ def _ensure_columns():
                 conn.execute(text("ALTER TABLE uploads ADD COLUMN workspace_id VARCHAR"))
             if "duplicate_count" not in upload_names:
                 conn.execute(text("ALTER TABLE uploads ADD COLUMN duplicate_count INTEGER DEFAULT 0"))
+            if "project_id" not in upload_names:
+                conn.execute(text("ALTER TABLE uploads ADD COLUMN project_id VARCHAR"))
 
         if "projects" in existing_tables:
             project_names = _table_columns(conn, "projects")
@@ -111,41 +119,86 @@ def _ensure_columns():
                 conn.execute(text("ALTER TABLE projects ADD COLUMN workspace_id VARCHAR"))
 
     _ensure_message_hash_index()
+    _migrate_project_data()
+
+
+def _migrate_project_data():
+    """Backfill project_id on uploads/messages and attach orphan uploads to a project."""
+    db = SessionLocal()
+    try:
+        for upload in db.query(Upload).filter(Upload.project_id.isnot(None)).all():
+            db.query(Message).filter(Message.upload_id == upload.id, Message.project_id.is_(None)).update(
+                {Message.project_id: upload.project_id}, synchronize_session=False
+            )
+
+        for workspace in db.query(Workspace).all():
+            default_project = (
+                db.query(Project)
+                .filter(Project.workspace_id == workspace.id)
+                .order_by(Project.created_at.asc())
+                .first()
+            )
+            if not default_project:
+                owner = db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == workspace.id).first()
+                if not owner:
+                    continue
+                default_project = Project(
+                    name="Imported media",
+                    created_by=owner.user_id,
+                    workspace_id=workspace.id,
+                )
+                db.add(default_project)
+                db.flush()
+                db.add(ProjectCanvas(project_id=default_project.id, name="Main canvas", nodes=[], edges=[], frames=[]))
+
+            db.query(Upload).filter(
+                Upload.workspace_id == workspace.id,
+                Upload.project_id.is_(None),
+            ).update({Upload.project_id: default_project.id}, synchronize_session=False)
+            db.query(Message).filter(
+                Message.workspace_id == workspace.id,
+                Message.project_id.is_(None),
+            ).update({Message.project_id: default_project.id}, synchronize_session=False)
+
+        db.commit()
+    finally:
+        db.close()
 
 
 def _ensure_message_hash_index():
-    """Move dedupe from global content_hash to per-workspace (workspace_id, content_hash)."""
+    """Ensure per-project dedupe index on (project_id, content_hash)."""
     inspector = inspect(engine)
     if "messages" not in inspector.get_table_names():
         return
 
     indexes = {item["name"]: item for item in inspector.get_indexes("messages")}
     uniques = {item["name"]: item for item in inspector.get_unique_constraints("messages")}
-    has_workspace_hash = any(
-        set(item.get("column_names") or []) == {"workspace_id", "content_hash"}
+    has_project_hash = any(
+        set(item.get("column_names") or []) == {"project_id", "content_hash"}
         for item in (*indexes.values(), *uniques.values())
     )
-    if has_workspace_hash:
+    if has_project_hash:
         return
 
     with engine.begin() as conn:
         if DB_BACKEND == "sqlite":
             for name, meta in indexes.items():
-                if meta.get("unique") and set(meta.get("column_names") or []) == {"content_hash"}:
+                cols = set(meta.get("column_names") or [])
+                if meta.get("unique") and cols in ({"content_hash"}, {"workspace_id", "content_hash"}):
                     conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
             conn.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_workspace_hash "
-                    "ON messages (workspace_id, content_hash)"
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_project_hash "
+                    "ON messages (project_id, content_hash)"
                 )
             )
         else:
-            conn.execute(text("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_content_hash_key"))
-            conn.execute(text("DROP INDEX IF EXISTS ix_messages_content_hash"))
+            conn.execute(text("ALTER TABLE messages DROP CONSTRAINT IF EXISTS uq_message_workspace_hash"))
+            conn.execute(text("DROP INDEX IF EXISTS uq_message_workspace_hash"))
             conn.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_workspace_hash "
-                    "ON messages (workspace_id, content_hash)"
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_project_hash "
+                    "ON messages (project_id, content_hash)"
                 )
             )
 
@@ -165,6 +218,8 @@ def seed_local_defaults():
     admin_email = (os.getenv("ADMIN_EMAIL") or "admin@local").strip().lower()
     admin_password = os.getenv("ADMIN_PASSWORD") or "admin123"
     admin_username = (os.getenv("ADMIN_USERNAME") or admin_email.split("@")[0] or "admin").strip()
+    from app.auth import SUPER_ADMIN_EMAILS
+    admin_role = "superadmin" if admin_email in SUPER_ADMIN_EMAILS else "admin"
 
     db = SessionLocal()
     try:
@@ -177,7 +232,7 @@ def seed_local_defaults():
                 username=admin_username,
                 email=admin_email,
                 password_hash=hash_password(admin_password),
-                role="admin",
+                role=admin_role,
             )
             db.add(admin)
             db.commit()
@@ -187,6 +242,9 @@ def seed_local_defaults():
                 admin.email = admin_email
             if admin_username and admin.username != admin_username:
                 admin.username = admin_username
+            # Promote the seeded admin to superadmin if their email is allowlisted.
+            if admin.email and admin.email.lower() in SUPER_ADMIN_EMAILS and admin.role != "superadmin":
+                admin.role = "superadmin"
             db.commit()
 
         ensure_personal_workspace(db, admin, name="Admin workspace")
@@ -201,7 +259,7 @@ def seed_local_defaults():
                 project = Project(name="My canvas", created_by=admin.id, workspace_id=workspace.id)
                 db.add(project)
                 db.flush()
-                db.add(ProjectCanvas(project_id=project.id, nodes=[], edges=[], frames=[]))
+                db.add(ProjectCanvas(project_id=project.id, name="Main canvas", nodes=[], edges=[], frames=[]))
         db.commit()
         _migrate_legacy_workspace_ids(db)
     finally:

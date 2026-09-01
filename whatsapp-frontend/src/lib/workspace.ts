@@ -49,6 +49,16 @@ export async function setActiveWorkspaceId(id: string) {
   window.dispatchEvent(new CustomEvent(WORKSPACE_EVENT, { detail: { workspaceId: id } }));
 }
 
+export function projectQuery(projectId: string, extra?: Record<string, string>): string {
+  const params = new URLSearchParams({ project_id: projectId });
+  if (extra) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (value) params.set(key, value);
+    }
+  }
+  return params.toString();
+}
+
 export async function refreshWorkspaces(): Promise<WorkspaceRecord[]> {
   return loadWorkspaces();
 }

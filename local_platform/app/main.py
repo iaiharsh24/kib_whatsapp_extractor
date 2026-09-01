@@ -23,7 +23,9 @@ _LOCAL_PLATFORM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _LOCAL_PLATFORM not in sys.path:
     sys.path.insert(0, _LOCAL_PLATFORM)
 
-from app.auth import bearer, get_current_user, hash_password, make_token, require_admin, serialize_user, user_from_token, verify_password
+from app.activity import log_activity, serialize_activity_log
+from app.auth import bearer, get_current_user, hash_password, make_token, require_admin, require_super_admin, is_super_admin, serialize_user, user_from_token, verify_password, SUPER_ADMIN_EMAILS
+from app.backups import run_backup, serialize_snapshot, start_backup_scheduler
 from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
 from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
@@ -32,7 +34,9 @@ from app.zip_extract import delete_upload_files, find_extracted_file
 from db import DB_BACKEND, DB_PATH, DATABASE_URL, create_tables, get_db, seed_local_defaults
 from db.workspaces import ensure_personal_workspace
 from db.models import (
+    ActivityLog,
     CanvasVersion,
+    DbSnapshot,
     Message,
     Project,
     ProjectCanvas,
@@ -141,6 +145,10 @@ class CanvasSave(BaseModel):
     viewport: Optional[dict] = None
 
 
+class CanvasCreate(BaseModel):
+    name: str = "New canvas"
+
+
 class PreferenceBody(BaseModel):
     value: object = None
 
@@ -155,6 +163,13 @@ class MessageTagsBody(BaseModel):
 
 class ItemAdd(BaseModel):
     message_id: str
+
+
+def workspace_name(db: Session, workspace_id: str | None) -> str | None:
+    if not workspace_id:
+        return None
+    row = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    return row.name if row else None
 
 
 def serialize_message(message: Message) -> dict:
@@ -196,6 +211,7 @@ def serialize_upload(upload: Upload, username: str | None = None) -> dict:
     return {
         "id": upload.id,
         "workspace_id": upload.workspace_id,
+        "project_id": upload.project_id,
         "file_name": upload.file_name,
         "uploaded_by": upload.uploaded_by,
         "uploaded_by_username": username,
@@ -218,13 +234,16 @@ def serialize_project(project: Project) -> dict:
     }
 
 
-def serialize_workspace(workspace: Workspace, role: str | None = None) -> dict:
+def serialize_workspace(workspace: Workspace, role: str | None = None, counts: dict | None = None) -> dict:
     return {
         "id": workspace.id,
         "name": workspace.name,
         "owner_id": workspace.owner_id,
         "created_at": workspace.created_at.isoformat() if workspace.created_at else None,
         "role": role,
+        "project_count": (counts or {}).get("projects", 0),
+        "upload_count": (counts or {}).get("uploads", 0),
+        "message_count": (counts or {}).get("messages", 0),
     }
 
 
@@ -351,13 +370,37 @@ def hydrate_canvas_nodes(nodes: list, messages: dict[str, dict]) -> list:
 
 def serialize_canvas(canvas: ProjectCanvas | None) -> dict:
     if not canvas:
-        return {"nodes": [], "edges": [], "frames": [], "viewport": None}
+        return {"id": None, "name": "Main canvas", "nodes": [], "edges": [], "frames": [], "viewport": None}
     return {
+        "id": canvas.id,
+        "name": canvas.name or "Main canvas",
         "nodes": canvas.nodes or [],
         "edges": canvas.edges or [],
         "frames": canvas.frames or [],
         "viewport": canvas.viewport if isinstance(canvas.viewport, dict) else None,
     }
+
+
+def serialize_canvas_summary(canvas: ProjectCanvas) -> dict:
+    return {
+        "id": canvas.id,
+        "name": canvas.name or "Main canvas",
+        "project_id": canvas.project_id,
+        "created_at": canvas.created_at.isoformat() if canvas.created_at else None,
+    }
+
+
+def get_project_canvas(db: Session, project_id: str, canvas_id: str | None = None) -> ProjectCanvas:
+    query = db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id)
+    if canvas_id:
+        canvas = query.filter(ProjectCanvas.id == canvas_id).first()
+    else:
+        canvas = query.order_by(ProjectCanvas.created_at.asc()).first()
+    if not canvas:
+        canvas = ProjectCanvas(project_id=project_id, name="Main canvas", nodes=[], edges=[], frames=[])
+        db.add(canvas)
+        db.flush()
+    return canvas
 
 
 def save_canvas_version(db: Session, canvas: ProjectCanvas, nodes: list, edges: list, frames: list) -> None:
@@ -412,6 +455,7 @@ async def startup():
     create_tables()
     seed_local_defaults()
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    start_backup_scheduler()
     def _background_jobs():
         from db import SessionLocal
         db = SessionLocal()
@@ -447,6 +491,7 @@ async def login(body: LoginBody, db: Session = Depends(get_db)):
         if not user or not verify_password(body.password, user.password_hash):
             raise HTTPException(status_code=401, detail="Invalid email or password")
         ensure_personal_workspace(db, user)
+        log_activity(db, user, "auth.login")
         db.commit()
         return {"token": make_token(user), "user": serialize_user(user)}
     except HTTPException:
@@ -518,6 +563,14 @@ async def signup(body: SignupBody, db: Session = Depends(get_db)):
                 )
 
     signup_code.used_count = (signup_code.used_count or 0) + 1
+    ws_name = workspace_name(db, signup_code.workspace_id)
+    log_activity(
+        db,
+        user,
+        "auth.signup",
+        workspace_id=signup_code.workspace_id,
+        details={"workspace_name": ws_name, "signup_code": signup_code.code},
+    )
     db.commit()
     db.refresh(user)
     return {"token": make_token(user), "user": serialize_user(user)}
@@ -555,7 +608,37 @@ async def list_workspaces(db: Session = Depends(get_db), user: User = Depends(ge
         .order_by(Workspace.created_at.asc())
         .all()
     )
-    return [serialize_workspace(workspace, member.role) for workspace, member in rows]
+    ws_ids = [workspace.id for workspace, _ in rows]
+    counts_by_ws: dict[str, dict] = {}
+    if ws_ids:
+        project_counts = dict(
+            db.query(Project.workspace_id, func.count(Project.id))
+            .filter(Project.workspace_id.in_(ws_ids))
+            .group_by(Project.workspace_id)
+            .all()
+        )
+        upload_counts = dict(
+            db.query(Upload.workspace_id, func.count(Upload.id))
+            .filter(Upload.workspace_id.in_(ws_ids))
+            .group_by(Upload.workspace_id)
+            .all()
+        )
+        message_counts = dict(
+            db.query(Message.workspace_id, func.count(Message.id))
+            .filter(Message.workspace_id.in_(ws_ids))
+            .group_by(Message.workspace_id)
+            .all()
+        )
+        for wid in ws_ids:
+            counts_by_ws[wid] = {
+                "projects": project_counts.get(wid, 0),
+                "uploads": upload_counts.get(wid, 0),
+                "messages": message_counts.get(wid, 0),
+            }
+    return [
+        serialize_workspace(workspace, member.role, counts_by_ws.get(workspace.id))
+        for workspace, member in rows
+    ]
 
 
 @app.post("/api/workspaces", status_code=201)
@@ -567,6 +650,15 @@ async def create_workspace(body: WorkspaceCreate, db: Session = Depends(get_db),
     db.add(workspace)
     db.flush()
     db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="owner"))
+    log_activity(
+        db,
+        user,
+        "workspace.create",
+        resource_type="workspace",
+        resource_id=workspace.id,
+        resource_name=workspace.name,
+        workspace_id=workspace.id,
+    )
     db.commit()
     db.refresh(workspace)
     return serialize_workspace(workspace, "owner")
@@ -584,6 +676,15 @@ async def rename_workspace(
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
     workspace.name = name
+    log_activity(
+        db,
+        user,
+        "workspace.rename",
+        resource_type="workspace",
+        resource_id=workspace.id,
+        resource_name=name,
+        workspace_id=workspace.id,
+    )
     db.commit()
     db.refresh(workspace)
     return serialize_workspace(workspace, "owner")
@@ -595,7 +696,17 @@ async def delete_workspace(workspace_id: str, db: Session = Depends(get_db), use
     member_workspaces = db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user.id).count()
     if member_workspaces <= 1:
         raise HTTPException(status_code=400, detail="You must keep at least one workspace")
+    workspace_name_value = workspace.name
     upload_ids = [row[0] for row in db.query(Upload.id).filter(Upload.workspace_id == workspace_id).all()]
+    log_activity(
+        db,
+        user,
+        "workspace.delete",
+        resource_type="workspace",
+        resource_id=workspace_id,
+        resource_name=workspace_name_value,
+        workspace_id=workspace_id,
+    )
     db.delete(workspace)
     db.commit()
     for upload_id in upload_ids:
@@ -647,6 +758,17 @@ async def remove_workspace_member(
     )
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
+    removed = db.query(User).filter(User.id == user_id).first()
+    log_activity(
+        db,
+        user,
+        "workspace.member.remove",
+        resource_type="user",
+        resource_id=user_id,
+        resource_name=(removed.email or removed.username) if removed else user_id,
+        workspace_id=workspace_id,
+        details={"workspace_name": workspace.name},
+    )
     db.delete(member)
     db.commit()
     return {"deleted": True, "user_id": user_id}
@@ -668,6 +790,16 @@ async def create_invite(
         created_by=user.id,
     )
     db.add(invite)
+    db.flush()
+    log_activity(
+        db,
+        user,
+        "workspace.invite.create",
+        resource_type="invite",
+        resource_id=invite.id,
+        workspace_id=workspace_id,
+        details={"workspace_name": workspace_name(db, workspace_id), "role": role},
+    )
     db.commit()
     db.refresh(invite)
     return serialize_invite(invite)
@@ -704,6 +836,15 @@ async def revoke_invite(
     if invite.created_by != user.id and not is_owner:
         raise HTTPException(status_code=403, detail="Only the invite creator or the owner can revoke this invite")
     invite.revoked = 1
+    log_activity(
+        db,
+        user,
+        "workspace.invite.revoke",
+        resource_type="invite",
+        resource_id=invite_id,
+        workspace_id=workspace_id,
+        details={"workspace_name": workspace.name},
+    )
     db.commit()
     return {"revoked": True, "id": invite_id}
 
@@ -769,6 +910,15 @@ async def accept_invite(
         db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role=invite.role))
         invite.used_count = (invite.used_count or 0) + 1
     ensure_personal_workspace(db, user)
+    log_activity(
+        db,
+        user,
+        "workspace.invite.accept",
+        resource_type="workspace",
+        resource_id=workspace.id,
+        resource_name=workspace.name,
+        workspace_id=workspace.id,
+    )
     db.commit()
     db.refresh(user)
     role = get_workspace_role(workspace.id, user.id, db) or invite.role
@@ -872,6 +1022,17 @@ async def create_workspace_tag(
         return {"id": existing.id, "name": existing.name, "count": 0, "created_at": existing.created_at.isoformat() if existing.created_at else None}
     tag = Tag(workspace_id=workspace_id, name=name)
     db.add(tag)
+    db.flush()
+    log_activity(
+        db,
+        user,
+        "tag.create",
+        resource_type="tag",
+        resource_id=tag.id,
+        resource_name=name,
+        workspace_id=workspace_id,
+        details={"workspace_name": workspace_name(db, workspace_id)},
+    )
     db.commit()
     db.refresh(tag)
     return {"id": tag.id, "name": tag.name, "count": 0, "created_at": tag.created_at.isoformat() if tag.created_at else None}
@@ -965,6 +1126,16 @@ async def rename_workspace_tag(
         if clash:
             raise HTTPException(status_code=400, detail="A tag with that name already exists")
     tag.name = new_name
+    log_activity(
+        db,
+        user,
+        "tag.rename",
+        resource_type="tag",
+        resource_id=tag.id,
+        resource_name=new_name,
+        workspace_id=workspace_id,
+        details={"workspace_name": workspace_name(db, workspace_id), "old_name": old_name},
+    )
     db.commit()
     _rewrite_tags_in_workspace(db, workspace_id, old_name, new_name)
     return {"id": tag.id, "name": tag.name}
@@ -983,6 +1154,16 @@ async def delete_workspace_tag(
         raise HTTPException(status_code=404, detail="Tag not found")
     old_name = tag.name
     db.delete(tag)
+    log_activity(
+        db,
+        user,
+        "tag.delete",
+        resource_type="tag",
+        resource_id=tag_id,
+        resource_name=old_name,
+        workspace_id=workspace_id,
+        details={"workspace_name": workspace_name(db, workspace_id)},
+    )
     db.commit()
     _rewrite_tags_in_workspace(db, workspace_id, old_name, None)
     return {"deleted": True, "id": tag_id}
@@ -1020,7 +1201,7 @@ def clean_user_tags(tags: list) -> list[str]:
 
 @app.get("/api/library")
 async def library(
-    workspace_id: str = Query(...),
+    project_id: str = Query(...),
     tab: str = Query("chat"),
     sender: Optional[str] = None,
     q: Optional[str] = None,
@@ -1035,8 +1216,8 @@ async def library(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    require_workspace_member(workspace_id, user, db)
-    query = db.query(Message).filter(Message.workspace_id == workspace_id)
+    project = require_project_access(project_id, user, db)
+    query = db.query(Message).filter(Message.project_id == project_id)
     if upload_id:
         query = query.filter(Message.upload_id == upload_id)
     tab_types = {
@@ -1089,14 +1270,14 @@ async def library(
     )
     type_rows = (
         db.query(Message.type, func.count(Message.id))
-        .filter(Message.workspace_id == workspace_id)
+        .filter(Message.project_id == project_id)
         .group_by(Message.type)
         .all()
     )
     by_type = {row[0]: row[1] for row in type_rows if row[0]}
     link_count = (
         db.query(Message)
-        .filter(Message.workspace_id == workspace_id)
+        .filter(Message.project_id == project_id)
         .filter(external_link_filter())
         .count()
     )
@@ -1117,12 +1298,12 @@ async def library(
 
 @app.get("/api/library/filters")
 async def library_filters(
-    workspace_id: str = Query(...),
+    project_id: str = Query(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    require_workspace_member(workspace_id, user, db)
-    base = db.query(Message).filter(Message.workspace_id == workspace_id)
+    project = require_project_access(project_id, user, db)
+    base = db.query(Message).filter(Message.project_id == project_id)
     senders = [
         row[0]
         for row in base.with_entities(Message.sender).distinct().order_by(Message.sender.asc()).all()
@@ -1143,7 +1324,7 @@ async def library_filters(
             label = preview.get("site") or preview.get("domain")
             if label:
                 sites.add(label)
-    for row in db.query(Tag.name).filter(Tag.workspace_id == workspace_id).all():
+    for row in db.query(Tag.name).filter(Tag.workspace_id == project.workspace_id).all():
         if row[0]:
             tags.add(row[0])
     return {
@@ -1190,7 +1371,9 @@ async def get_message(message_id: str, db: Session = Depends(get_db), user: User
     message = db.query(Message).filter(Message.id == message_id).first()
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-    if message.workspace_id:
+    if message.project_id:
+        require_project_access(message.project_id, user, db)
+    elif message.workspace_id:
         require_workspace_member(message.workspace_id, user, db)
     return serialize_message(message)
 
@@ -1205,7 +1388,9 @@ async def patch_message_tags(
     message = db.query(Message).filter(Message.id == message_id).first()
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-    if message.workspace_id:
+    if message.project_id:
+        require_project_access(message.project_id, user, db)
+    elif message.workspace_id:
         require_workspace_member(message.workspace_id, user, db)
     kept = [item for item in (message.tags or []) if isinstance(item, str) and item.lower() in TYPE_TAGS]
     user_tags = clean_user_tags(body.tags)
@@ -1218,23 +1403,36 @@ async def patch_message_tags(
 
 @app.post("/api/uploads/file", status_code=201)
 async def upload_txt(
-    workspace_id: str = Query(...),
+    project_id: str = Query(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    require_workspace_member(workspace_id, user, db)
+    project = require_project_access(project_id, user, db)
     saved_name = file.filename or "chat.txt"
     if not saved_name.lower().endswith((".txt", ".zip")):
         raise HTTPException(status_code=400, detail="Upload a WhatsApp .txt export (or a zip that contains one).")
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     upload = Upload(
-        workspace_id=workspace_id,
+        workspace_id=project.workspace_id,
+        project_id=project.id,
         file_name=saved_name,
         uploaded_by=user.id,
         status="extracting" if saved_name.lower().endswith(".zip") else "processing",
     )
     db.add(upload)
+    db.flush()
+    ws_name = workspace_name(db, project.workspace_id)
+    log_activity(
+        db,
+        user,
+        "upload.start",
+        resource_type="upload",
+        resource_id=upload.id,
+        resource_name=saved_name,
+        workspace_id=project.workspace_id,
+        details={"workspace_name": ws_name, "project_name": project.name, "project_id": project.id},
+    )
     db.commit()
     db.refresh(upload)
     dest = os.path.join(UPLOAD_DIR, f"{upload.id}_{os.path.basename(saved_name)}")
@@ -1266,17 +1464,29 @@ async def serve_extracted_file(
 
 @app.get("/api/uploads")
 async def list_uploads(
-    workspace_id: str = Query(...),
+    project_id: Optional[str] = Query(None),
+    workspace_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    require_workspace_member(workspace_id, user, db)
-    uploads = (
-        db.query(Upload)
-        .filter(Upload.workspace_id == workspace_id)
-        .order_by(Upload.uploaded_at.desc())
-        .all()
-    )
+    if project_id:
+        require_project_access(project_id, user, db)
+        uploads = (
+            db.query(Upload)
+            .filter(Upload.project_id == project_id)
+            .order_by(Upload.uploaded_at.desc())
+            .all()
+        )
+    elif workspace_id:
+        require_workspace_member(workspace_id, user, db)
+        uploads = (
+            db.query(Upload)
+            .filter(Upload.workspace_id == workspace_id)
+            .order_by(Upload.uploaded_at.desc())
+            .all()
+        )
+    else:
+        raise HTTPException(status_code=400, detail="project_id or workspace_id is required")
     users = {item.id: item.username for item in db.query(User).all()}
     return [serialize_upload(item, users.get(item.uploaded_by)) for item in uploads]
 
@@ -1290,7 +1500,9 @@ async def get_upload(
     upload = db.query(Upload).filter(Upload.id == upload_id).first()
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
-    if upload.workspace_id:
+    if upload.project_id:
+        require_project_access(upload.project_id, user, db)
+    elif upload.workspace_id:
         require_workspace_member(upload.workspace_id, user, db)
     uploader = db.query(User).filter(User.id == upload.uploaded_by).first()
     return serialize_upload(upload, uploader.username if uploader else None)
@@ -1305,6 +1517,17 @@ async def delete_upload(
     upload = db.query(Upload).filter(Upload.id == upload_id).first()
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
+    file_name = upload.file_name
+    log_activity(
+        db,
+        admin,
+        "upload.delete",
+        resource_type="upload",
+        resource_id=upload_id,
+        resource_name=file_name,
+        workspace_id=upload.workspace_id,
+        details={"workspace_name": workspace_name(db, upload.workspace_id)},
+    )
     message_ids = [row[0] for row in db.query(Message.id).filter(Message.upload_id == upload_id).all()]
     if message_ids:
         db.query(ProjectItem).filter(ProjectItem.message_id.in_(message_ids)).delete(synchronize_session=False)
@@ -1338,7 +1561,18 @@ async def create_project(body: ProjectCreate, db: Session = Depends(get_db), use
     project = Project(name=body.name, created_by=user.id, workspace_id=body.workspace_id)
     db.add(project)
     db.flush()
-    db.add(ProjectCanvas(project_id=project.id, nodes=[], edges=[], frames=[]))
+    db.add(ProjectCanvas(project_id=project.id, name="Main canvas", nodes=[], edges=[], frames=[]))
+    ws_name = workspace_name(db, body.workspace_id)
+    log_activity(
+        db,
+        user,
+        "project.create",
+        resource_type="project",
+        resource_id=project.id,
+        resource_name=project.name,
+        workspace_id=body.workspace_id,
+        details={"workspace_name": ws_name},
+    )
     db.commit()
     db.refresh(project)
     return serialize_project(project)
@@ -1364,6 +1598,7 @@ async def duplicate_project(project_id: str, db: Session = Depends(get_db), user
     db.add(
         ProjectCanvas(
             project_id=project.id,
+            name="Main canvas",
             nodes=copy.deepcopy(canvas.nodes or []) if canvas else [],
             edges=copy.deepcopy(canvas.edges or []) if canvas else [],
             frames=copy.deepcopy(canvas.frames or []) if canvas else [],
@@ -1371,6 +1606,16 @@ async def duplicate_project(project_id: str, db: Session = Depends(get_db), user
     )
     for item in items:
         db.add(ProjectItem(project_id=project.id, message_id=item.message_id))
+    log_activity(
+        db,
+        user,
+        "project.duplicate",
+        resource_type="project",
+        resource_id=project.id,
+        resource_name=project.name,
+        workspace_id=source.workspace_id,
+        details={"workspace_name": workspace_name(db, source.workspace_id), "source_project": source.name},
+    )
     db.commit()
     db.refresh(project)
     return serialize_project(project)
@@ -1383,6 +1628,16 @@ async def rename_project(project_id: str, body: ProjectPatch, db: Session = Depe
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
     project.name = name
+    log_activity(
+        db,
+        user,
+        "project.rename",
+        resource_type="project",
+        resource_id=project.id,
+        resource_name=name,
+        workspace_id=project.workspace_id,
+        details={"workspace_name": workspace_name(db, project.workspace_id)},
+    )
     db.commit()
     db.refresh(project)
     return serialize_project(project)
@@ -1391,23 +1646,55 @@ async def rename_project(project_id: str, body: ProjectPatch, db: Session = Depe
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     project = require_project_access(project_id, user, db)
+    project_name = project.name
+    ws_id = project.workspace_id
     db.query(ProjectItem).filter(ProjectItem.project_id == project_id).delete()
     db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).delete()
+    log_activity(
+        db,
+        user,
+        "project.delete",
+        resource_type="project",
+        resource_id=project_id,
+        resource_name=project_name,
+        workspace_id=ws_id,
+        details={"workspace_name": workspace_name(db, ws_id)},
+    )
     db.delete(project)
     db.commit()
     return {"deleted": True, "id": project_id}
 
 
 @app.get("/api/projects/{project_id}")
-async def get_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+async def get_project(
+    project_id: str,
+    canvas_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     project = require_project_access(project_id, user, db)
-    canvas = db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).first()
+    canvases = (
+        db.query(ProjectCanvas)
+        .filter(ProjectCanvas.project_id == project_id)
+        .order_by(ProjectCanvas.created_at.asc())
+        .all()
+    )
+    canvas = get_project_canvas(db, project_id, canvas_id)
+    if canvas not in canvases:
+        canvases.append(canvas)
     items = (
         db.query(ProjectItem)
         .options(joinedload(ProjectItem.message))
         .filter(ProjectItem.project_id == project_id)
         .all()
     )
+    uploads = (
+        db.query(Upload)
+        .filter(Upload.project_id == project_id)
+        .order_by(Upload.uploaded_at.desc())
+        .all()
+    )
+    uploaders = {item.id: item.username for item in db.query(User).all()}
     serialized_items = [serialize_message(item.message) for item in items if item.message]
     by_id = {item["id"]: item for item in serialized_items}
     canvas_json = serialize_canvas(canvas)
@@ -1426,22 +1713,53 @@ async def get_project(project_id: str, db: Session = Depends(get_db), user: User
     return {
         "project": serialize_project(project),
         "canvas": canvas_json,
+        "canvas_id": canvas.id,
+        "canvases": [serialize_canvas_summary(item) for item in canvases],
+        "uploads": [serialize_upload(item, uploaders.get(item.uploaded_by)) for item in uploads],
         "items": serialized_items,
     }
+
+
+@app.post("/api/projects/{project_id}/canvases", status_code=201)
+async def create_project_canvas(
+    project_id: str,
+    body: CanvasCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    project = require_project_access(project_id, user, db)
+    name = (body.name or "").strip() or "New canvas"
+    canvas = ProjectCanvas(project_id=project_id, name=name, nodes=[], edges=[], frames=[])
+    db.add(canvas)
+    db.flush()
+    log_activity(
+        db,
+        user,
+        "canvas.create",
+        resource_type="canvas",
+        resource_id=canvas.id,
+        resource_name=name,
+        workspace_id=project.workspace_id,
+        details={
+            "workspace_name": workspace_name(db, project.workspace_id),
+            "project_name": project.name,
+        },
+    )
+    db.commit()
+    db.refresh(canvas)
+    return serialize_canvas_summary(canvas)
 
 
 @app.put("/api/projects/{project_id}/canvas")
 async def save_canvas(
     project_id: str,
     body: CanvasSave,
+    canvas_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    project = require_project_access(project_id, user, db)
-    canvas = db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).first()
-    if not canvas:
-        canvas = ProjectCanvas(project_id=project_id)
-        db.add(canvas)
+    require_project_access(project_id, user, db)
+    canvas = get_project_canvas(db, project_id, canvas_id)
     canvas.nodes = body.nodes
     canvas.edges = body.edges
     canvas.frames = body.frames
@@ -1457,13 +1775,12 @@ async def save_canvas(
 @app.get("/api/projects/{project_id}/canvas/history")
 async def list_canvas_history(
     project_id: str,
+    canvas_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     require_project_access(project_id, user, db)
-    canvas = db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).first()
-    if not canvas:
-        return []
+    canvas = get_project_canvas(db, project_id, canvas_id)
     rows = (
         db.query(CanvasVersion)
         .filter(CanvasVersion.canvas_id == canvas.id)
@@ -1478,13 +1795,12 @@ async def list_canvas_history(
 async def get_canvas_history_version(
     project_id: str,
     version_id: str,
+    canvas_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     require_project_access(project_id, user, db)
-    canvas = db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).first()
-    if not canvas:
-        raise HTTPException(status_code=404, detail="Canvas not found")
+    canvas = get_project_canvas(db, project_id, canvas_id)
     row = (
         db.query(CanvasVersion)
         .filter(CanvasVersion.id == version_id, CanvasVersion.canvas_id == canvas.id)
@@ -1585,6 +1901,165 @@ async def project_chat(
     return {"answer": answer, "sources_used": len(sources)}
 
 
+@app.get("/api/admin/activity-logs")
+async def list_activity_logs(
+    workspace_id: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    query = db.query(ActivityLog)
+    if workspace_id:
+        query = query.filter(ActivityLog.workspace_id == workspace_id)
+    total = query.count()
+    rows = query.order_by(ActivityLog.created_at.desc()).offset(offset).limit(limit).all()
+    return {"total": total, "items": [serialize_activity_log(row) for row in rows]}
+
+
+# ---------- Super-admin: Database overview + snapshots ----------
+
+def _serialize_upload_for_db(upload: Upload, uploader_name: str | None) -> dict:
+    return {
+        "id": upload.id,
+        "file_name": upload.file_name,
+        "status": upload.status,
+        "message_count": upload.message_count or 0,
+        "duplicate_count": upload.duplicate_count or 0,
+        "uploaded_by_username": uploader_name,
+        "uploaded_at": upload.uploaded_at.isoformat() if upload.uploaded_at else None,
+        "chat_name": upload.chat_name,
+        "error_message": upload.error_message,
+    }
+
+
+@app.get("/api/admin/db/overview")
+async def db_overview(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """All zip uploads organized by workspace -> project, plus global counts."""
+    workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
+    projects = db.query(Project).order_by(Project.created_at.desc()).all()
+    uploads = db.query(Upload).order_by(Upload.uploaded_at.desc()).all()
+    users = {item.id: item.username for item in db.query(User).all()}
+
+    uploads_by_project: dict[str, list] = {}
+    for upload in uploads:
+        key = upload.project_id or "_orphan"
+        uploads_by_project.setdefault(key, []).append(
+            _serialize_upload_for_db(upload, users.get(upload.uploaded_by))
+        )
+
+    projects_by_workspace: dict[str, list] = {}
+    for project in projects:
+        projects_by_workspace.setdefault(project.workspace_id or "_none", []).append({
+            "id": project.id,
+            "name": project.name,
+            "created_at": project.created_at.isoformat() if project.created_at else None,
+            "uploads": uploads_by_project.get(project.id, []),
+            "message_count": db.query(Message).filter(Message.project_id == project.id).count(),
+            "canvas_count": db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project.id).count(),
+        })
+
+    workspace_rows = []
+    for ws in workspaces:
+        ws_projects = projects_by_workspace.get(ws.id, [])
+        ws_uploads = sum(len(p["uploads"]) for p in ws_projects)
+        ws_messages = sum(p["message_count"] for p in ws_projects)
+        workspace_rows.append({
+            "id": ws.id,
+            "name": ws.name,
+            "owner_id": ws.owner_id,
+            "owner_username": users.get(ws.owner_id),
+            "created_at": ws.created_at.isoformat() if ws.created_at else None,
+            "project_count": len(ws_projects),
+            "upload_count": ws_uploads,
+            "message_count": ws_messages,
+            "projects": ws_projects,
+        })
+
+    return {
+        "backend": DB_BACKEND,
+        "totals": {
+            "workspaces": len(workspaces),
+            "projects": len(projects),
+            "uploads": len(uploads),
+            "messages": db.query(Message).count(),
+            "users": db.query(User).count(),
+            "members": db.query(WorkspaceMember).count(),
+        },
+        "workspaces": workspace_rows,
+    }
+
+
+@app.get("/api/admin/db/snapshots")
+async def list_db_snapshots(
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    total = db.query(DbSnapshot).count()
+    rows = (
+        db.query(DbSnapshot)
+        .order_by(DbSnapshot.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {"total": total, "items": [serialize_snapshot(row) for row in rows]}
+
+
+@app.post("/api/admin/db/snapshots", status_code=201)
+async def create_db_snapshot(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    snapshot = run_backup(kind="manual", notes=f"Triggered by {admin.email or admin.username}")
+    log_activity(
+        db,
+        admin,
+        "db.snapshot.create",
+        resource_type="db_snapshot",
+        resource_id=snapshot.id,
+        resource_name=snapshot.file_name,
+        details={"size_bytes": snapshot.size_bytes, "backend": snapshot.backend},
+    )
+    db.commit()
+    return serialize_snapshot(snapshot)
+
+
+@app.get("/api/admin/db/snapshots/{snapshot_id}/download")
+async def download_db_snapshot(
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    from fastapi.responses import FileResponse as _FileResponse
+    snapshot = db.query(DbSnapshot).filter(DbSnapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    path = os.path.abspath(snapshot.file_path)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Snapshot file missing from disk")
+    return _FileResponse(path, filename=snapshot.file_name)
+
+
+@app.delete("/api/admin/db/snapshots/{snapshot_id}")
+async def delete_db_snapshot(
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    snapshot = db.query(DbSnapshot).filter(DbSnapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    try:
+        if os.path.isfile(snapshot.file_path):
+            os.remove(snapshot.file_path)
+    except Exception:
+        pass
+    db.delete(snapshot)
+    db.commit()
+    return {"deleted": True, "id": snapshot_id}
+
+
 @app.get("/api/admin/users")
 async def list_users(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     return [serialize_user(item) for item in db.query(User).order_by(User.username.asc()).all()]
@@ -1592,8 +2067,10 @@ async def list_users(db: Session = Depends(get_db), admin: User = Depends(requir
 
 @app.post("/api/admin/users", status_code=201)
 async def add_user(body: UserCreate, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
-    if body.role not in {"admin", "member"}:
-        raise HTTPException(status_code=400, detail="Role must be admin or member")
+    if body.role not in {"superadmin", "admin", "member"}:
+        raise HTTPException(status_code=400, detail="Role must be superadmin, admin or member")
+    if body.role == "superadmin" and not is_super_admin(admin):
+        raise HTTPException(status_code=403, detail="Only a super admin can create super admin accounts")
     email = (body.email or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
@@ -1606,6 +2083,15 @@ async def add_user(body: UserCreate, db: Session = Depends(get_db), admin: User 
     db.add(user)
     db.flush()
     ensure_personal_workspace(db, user)
+    log_activity(
+        db,
+        admin,
+        "admin.user.create",
+        resource_type="user",
+        resource_id=user.id,
+        resource_name=user.email or user.username,
+        details={"role": user.role},
+    )
     db.commit()
     db.refresh(user)
     data = serialize_user(user)
@@ -1639,6 +2125,16 @@ async def create_signup_code(
         workspace_role=body.workspace_role,
     )
     db.add(signup_code)
+    log_activity(
+        db,
+        admin,
+        "admin.signup_code.create",
+        resource_type="signup_code",
+        resource_id=signup_code.id,
+        resource_name=signup_code.code,
+        workspace_id=body.workspace_id,
+        details={"workspace_name": workspace_name(db, body.workspace_id), "note": signup_code.note},
+    )
     db.commit()
     db.refresh(signup_code)
     return serialize_signup_code(signup_code)
@@ -1654,6 +2150,16 @@ async def revoke_signup_code(
     if not signup_code:
         raise HTTPException(status_code=404, detail="Signup code not found")
     signup_code.revoked = 1
+    log_activity(
+        db,
+        admin,
+        "admin.signup_code.revoke",
+        resource_type="signup_code",
+        resource_id=code_id,
+        resource_name=signup_code.code,
+        workspace_id=signup_code.workspace_id,
+        details={"workspace_name": workspace_name(db, signup_code.workspace_id)},
+    )
     db.commit()
     return {"revoked": True, "id": code_id}
 
@@ -1670,6 +2176,14 @@ async def reset_password(
         raise HTTPException(status_code=404, detail="User not found")
     temp = body.password or secrets.token_urlsafe(8)
     user.password_hash = hash_password(temp)
+    log_activity(
+        db,
+        admin,
+        "admin.user.reset_password",
+        resource_type="user",
+        resource_id=user.id,
+        resource_name=user.email or user.username,
+    )
     db.commit()
     return {"id": user.id, "username": user.username, "temporary_password": temp}
 
@@ -1681,12 +2195,32 @@ async def change_role(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    if body.role not in {"admin", "member"}:
-        raise HTTPException(status_code=400, detail="Role must be admin or member")
+    if body.role not in {"superadmin", "admin", "member"}:
+        raise HTTPException(status_code=400, detail="Role must be superadmin, admin or member")
+    if body.role == "superadmin" and not is_super_admin(admin):
+        raise HTTPException(status_code=403, detail="Only a super admin can grant super admin")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # Prevent demoting yourself out of superadmin if you'd be the last one.
+    if is_super_admin(user) and body.role != "superadmin" and user.id == admin.id:
+        super_count = db.query(User).filter(User.role == "superadmin").count()
+        email_super = sum(
+            1 for u in db.query(User).filter(User.role == "admin").all()
+            if u.email and u.email.lower() in SUPER_ADMIN_EMAILS
+        )
+        if super_count + email_super <= 1:
+            raise HTTPException(status_code=400, detail="You are the only super admin — promote someone else first")
     user.role = body.role
+    log_activity(
+        db,
+        admin,
+        "admin.user.role_change",
+        resource_type="user",
+        resource_id=user.id,
+        resource_name=user.email or user.username,
+        details={"role": body.role},
+    )
     db.commit()
     return serialize_user(user)
 
@@ -1698,6 +2232,15 @@ async def remove_user(user_id: str, db: Session = Depends(get_db), admin: User =
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    removed_name = user.email or user.username
+    log_activity(
+        db,
+        admin,
+        "admin.user.delete",
+        resource_type="user",
+        resource_id=user_id,
+        resource_name=removed_name,
+    )
     db.query(Upload).filter(Upload.uploaded_by == user_id).update({"uploaded_by": admin.id})
     db.query(Project).filter(Project.created_by == user_id).update({"created_by": admin.id})
     db.query(Workspace).filter(Workspace.owner_id == user_id).update({"owner_id": admin.id})

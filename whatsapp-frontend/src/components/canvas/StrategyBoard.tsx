@@ -54,6 +54,7 @@ import type { TagRecord } from "@/lib/types";
 
 type BoardProps = {
   projectId: string;
+  canvasId?: string;
   initialNodes: Node[];
   initialEdges: Edge[];
   initialFrames: Node[];
@@ -62,8 +63,13 @@ type BoardProps = {
 
 type Snapshot = { nodes: Node[]; edges: Edge[] };
 
+function canvasQuery(canvasId?: string): string {
+  return canvasId ? `?canvas_id=${encodeURIComponent(canvasId)}` : "";
+}
+
 export default function StrategyBoard({
   projectId,
+  canvasId,
   initialNodes,
   initialEdges,
   initialFrames,
@@ -78,7 +84,7 @@ export default function StrategyBoard({
   const [color, setColor] = useState("#fde68a");
   const [zoom, setZoom] = useState(1);
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 });
-  const [showMap, setShowMap] = useState(false);
+  const [showMap, setShowMap] = useState(true);
   const [menu, setMenu] = useState<{ x: number; y: number; nodeId?: string } | null>(null);
   const [guides, setGuides] = useState<Guides>({ x: null, y: null });
   const [search, setSearch] = useState("");
@@ -104,7 +110,7 @@ export default function StrategyBoard({
         const allNodes = getNodes();
         const frames = allNodes.filter((node) => node.type === "frame");
         const cards = allNodes.filter((node) => node.type !== "frame");
-        void api(`/api/projects/${projectId}/canvas`, {
+        void api(`/api/projects/${projectId}/canvas${canvasQuery(canvasId)}`, {
           method: "PUT",
           body: JSON.stringify({
             nodes: cards.map(stripNode),
@@ -115,7 +121,7 @@ export default function StrategyBoard({
         });
       }, 900);
     },
-    [getEdges, getNodes, projectId],
+    [getEdges, getNodes, projectId, canvasId],
   );
 
   const persist = useCallback(
@@ -124,7 +130,7 @@ export default function StrategyBoard({
       saveTimer.current = window.setTimeout(() => {
         const frames = nextNodes.filter((node) => node.type === "frame");
         const cards = nextNodes.filter((node) => node.type !== "frame");
-        void api(`/api/projects/${projectId}/canvas`, {
+        void api(`/api/projects/${projectId}/canvas${canvasQuery(canvasId)}`, {
           method: "PUT",
           body: JSON.stringify({
             nodes: cards.map(stripNode),
@@ -133,13 +139,13 @@ export default function StrategyBoard({
             viewport: viewRef.current,
           }),
         }).then(() =>
-          api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history`)
+          api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history${canvasQuery(canvasId)}`)
             .then(setHistory)
             .catch(() => undefined),
         );
       }, 700);
     },
-    [projectId],
+    [projectId, canvasId],
   );
 
   useEffect(() => {
@@ -179,10 +185,10 @@ export default function StrategyBoard({
   }, [getEdges, setNodes]);
 
   useEffect(() => {
-    void api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history`)
+    void api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history${canvasQuery(canvasId)}`)
       .then(setHistory)
       .catch(() => setHistory([]));
-  }, [projectId]);
+  }, [projectId, canvasId]);
 
   function snapshot() {
     past.current.push({
@@ -574,7 +580,9 @@ export default function StrategyBoard({
   function restoreHistory(index: number) {
     const item = history[index];
     if (!item?.id) return;
-    void api<{ nodes: Node[]; edges: Edge[]; frames: Node[] }>(`/api/projects/${projectId}/canvas/history/${item.id}`)
+    void api<{ nodes: Node[]; edges: Edge[]; frames: Node[] }>(
+      `/api/projects/${projectId}/canvas/history/${item.id}${canvasQuery(canvasId)}`,
+    )
       .then((version) => {
         snapshot();
         setNodes([...(version.frames || []), ...(version.nodes || [])]);
@@ -896,9 +904,21 @@ export default function StrategyBoard({
                 pannable
                 zoomable
                 position="bottom-right"
-                bgColor="#f5f5f5"
-                maskColor="rgba(66, 98, 255, 0.08)"
-                nodeColor="#c4c4c4"
+                className="canvas-tracker"
+                style={{ bottom: 16, right: 16, width: 176, height: 112 }}
+                bgColor="#1f1f1f"
+                maskColor="rgba(139, 92, 246, 0.18)"
+                maskStrokeColor="rgba(167, 139, 250, 0.85)"
+                maskStrokeWidth={2}
+                nodeColor={(node) => {
+                  const type = String(node.type || "");
+                  if (type === "frame") return "#f59e0b";
+                  if (type === "sticky") return "#fde68a";
+                  if (type === "media") return "#22d3ee";
+                  if (type === "note") return "#86efac";
+                  return "#60a5fa";
+                }}
+                nodeStrokeWidth={0}
               />
             ) : null}
           </ReactFlow>

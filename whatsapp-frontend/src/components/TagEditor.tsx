@@ -18,14 +18,19 @@ export default function TagEditor({
 }) {
   const listId = useId();
   const [draft, setDraft] = useState("");
+  const [focused, setFocused] = useState(false);
   const incoming = uniqueTags(tags);
   const incomingKey = incoming.join("\0");
   const [pending, setPending] = useState<string[] | null>(null);
   const current = pending ?? incoming;
   const suggestions = useMemo(() => {
     const have = new Set(current.map((tag) => tag.toLowerCase()));
-    return knownTags.filter((tag) => !have.has(tag.toLowerCase())).slice(0, 20);
-  }, [current, knownTags]);
+    const query = draft.trim().toLowerCase();
+    return knownTags
+      .filter((tag) => !have.has(tag.toLowerCase()))
+      .filter((tag) => !query || tag.toLowerCase().includes(query))
+      .slice(0, 12);
+  }, [current, draft, knownTags]);
 
   useEffect(() => {
     if (pending && pending.join("\0") === incomingKey) setPending(null);
@@ -47,7 +52,7 @@ export default function TagEditor({
   }
 
   function add(raw: string) {
-    const name = raw.trim();
+    const name = raw.trim().replace(/,/g, "");
     if (!name) return;
     setDraft("");
     void commit([...current, name]);
@@ -82,25 +87,62 @@ export default function TagEditor({
           </span>
         ))}
         {disabled ? null : (
-          <input
-            value={draft}
-            list={listId}
-            placeholder="+ tag"
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              event.stopPropagation();
-              if (event.key === "Enter" || event.key === ",") {
-                event.preventDefault();
-                add(draft.replace(/,/g, ""));
-              }
-            }}
-            onBlur={() => {
-              if (draft.trim()) add(draft);
-            }}
-            className="min-w-16 flex-1 bg-transparent text-[11px] outline-none placeholder:text-zinc-400"
-          />
+          <div className="flex min-w-[120px] flex-1 items-center gap-1 rounded-md border border-dashed border-zinc-200 bg-zinc-50 px-2 py-1">
+            <input
+              value={draft}
+              list={listId}
+              placeholder="+ tag"
+              onChange={(event) => setDraft(event.target.value)}
+              onFocus={(event) => {
+                event.stopPropagation();
+                setFocused(true);
+              }}
+              onBlur={() => {
+                setFocused(false);
+                if (draft.trim()) add(draft);
+              }}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Enter" || event.key === ",") {
+                  event.preventDefault();
+                  add(draft);
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setDraft("");
+                  (event.target as HTMLInputElement).blur();
+                }
+              }}
+              className="nodrag nopan nowheel min-w-0 flex-1 bg-transparent text-[11px] outline-none placeholder:text-zinc-400"
+            />
+            {draft.trim() ? (
+              <button
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => add(draft)}
+                className="shrink-0 rounded bg-emerald-700 px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-emerald-800"
+              >
+                Add
+              </button>
+            ) : null}
+          </div>
         )}
       </div>
+      {!disabled && focused && suggestions.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {suggestions.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => add(tag)}
+              className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[10px] text-zinc-600 hover:border-emerald-400 hover:text-emerald-700"
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <datalist id={listId}>
         {suggestions.map((tag) => (
           <option key={tag} value={tag} />

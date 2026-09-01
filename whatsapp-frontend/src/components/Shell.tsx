@@ -185,8 +185,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           ) : (
             <span className="flex items-start justify-between gap-2">
               <span>
-                <p className="text-[11px] uppercase tracking-[0.18em] text-emerald-400">Internal tool</p>
-                <h1 className="mt-1 text-lg font-semibold leading-tight">Strategy Canvas</h1>
+                <h1 className="text-lg font-semibold leading-tight">Strategy Canvas</h1>
               </span>
               <Chevron dir="left" />
             </span>
@@ -194,39 +193,25 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         </button>
 
         {collapsed ? null : (
-          <div className="border-b border-white/10 px-3 py-3">
-            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Workspace</label>
-            <select
-              value={activeWorkspace?.id || ""}
-              onChange={(event) => void switchWorkspace(event.target.value)}
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-sm text-white"
-            >
-              {workspaces.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-            <div className="mt-2 flex gap-2 text-[11px]">
-              <button type="button" onClick={() => void createWorkspacePrompt()} className="text-emerald-400 hover:underline">
-                New
-              </button>
-              <Link href="/workspace" className="text-zinc-400 hover:text-white hover:underline">
-                Settings
-              </Link>
-            </div>
-          </div>
+          <Link
+            href="/workspace"
+            title="Switch workspace"
+            className="block border-b border-white/10 px-3 py-3 text-zinc-100 hover:bg-white/5"
+          >
+            <p className="text-[10px] uppercase tracking-wide text-zinc-500">Workspace</p>
+            <p className="mt-0.5 truncate text-sm font-medium text-white">{activeWorkspace?.name || "Select workspace"}</p>
+          </Link>
         )}
 
         <nav className={`flex flex-col gap-1 ${collapsed ? "p-1" : "p-3"}`}>
           <Link
             href="/"
-            title="Library"
+            title="Projects"
             className={`rounded-md text-sm ${
               collapsed ? "px-0 py-2 text-center" : "px-3 py-2"
             } ${pathname === "/" ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
           >
-            {collapsed ? "L" : "Library"}
+            {collapsed ? "P" : "Projects"}
           </Link>
           <Link
             href="/tags"
@@ -237,7 +222,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           >
             {collapsed ? "T" : "Tags"}
           </Link>
-          {user?.role === "admin" ? (
+          {user?.role === "admin" || user?.is_super_admin ? (
             <Link
               href="/admin"
               title="Admin"
@@ -246,6 +231,17 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               } ${(pathname ?? "").startsWith("/admin") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
             >
               {collapsed ? "A" : "Admin"}
+            </Link>
+          ) : null}
+          {user?.is_super_admin ? (
+            <Link
+              href="/database"
+              title="Database"
+              className={`rounded-md text-sm ${
+                collapsed ? "px-0 py-2 text-center" : "px-3 py-2"
+              } ${(pathname ?? "").startsWith("/database") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
+            >
+              {collapsed ? "D" : "Database"}
             </Link>
           ) : null}
         </nav>

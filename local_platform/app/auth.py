@@ -59,8 +59,29 @@ def get_current_user(
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "admin":
+    if user.role not in {"admin", "superadmin"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
+    return user
+
+
+SUPER_ADMIN_EMAILS = {
+    email.strip().lower()
+    for email in os.getenv("SUPER_ADMIN_EMAILS", "harsh.jaiswal@anibrain.com").split(",")
+    if email.strip()
+}
+
+
+def is_super_admin(user: User | None) -> bool:
+    if not user:
+        return False
+    if user.role == "superadmin":
+        return True
+    return user.role == "admin" and bool(user.email and user.email.lower() in SUPER_ADMIN_EMAILS)
+
+
+def require_super_admin(user: User = Depends(get_current_user)) -> User:
+    if not is_super_admin(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin only")
     return user
 
 
@@ -70,5 +91,6 @@ def serialize_user(user: User) -> dict:
         "username": user.username,
         "email": user.email,
         "role": user.role,
+        "is_super_admin": is_super_admin(user),
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }

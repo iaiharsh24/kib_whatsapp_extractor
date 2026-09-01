@@ -27,6 +27,7 @@ function NodeHandles() {
 export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps) {
   const { setNodeTags, knownTags } = useCanvasEdit();
   const item = data as {
+    messageId?: string;
     type?: string;
     sender?: string;
     text?: string;
@@ -106,6 +107,7 @@ export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps
             tags={visibleTags(item.tags)}
             knownTags={knownTags}
             disabled={item.locked}
+            messageId={item.messageId}
             onChange={(tags) => setNodeTags(id, tags)}
           />
         </div>

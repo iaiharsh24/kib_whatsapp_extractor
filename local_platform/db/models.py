@@ -112,6 +112,7 @@ class Upload(Base):
 
     id = Column(String, primary_key=True, default=lambda: new_id("upload"))
     workspace_id = Column(String, ForeignKey("workspaces.id"), nullable=True, index=True)
+    project_id = Column(String, ForeignKey("projects.id"), nullable=True, index=True)
     file_name = Column(String, nullable=False)
     uploaded_by = Column(String, ForeignKey("users.id"), nullable=False)
     uploaded_at = Column(DateTime, server_default=func.now())
@@ -123,6 +124,7 @@ class Upload(Base):
 
     uploader = relationship("User", back_populates="uploads")
     workspace = relationship("Workspace", back_populates="uploads")
+    project = relationship("Project", back_populates="uploads")
     messages = relationship("Message", back_populates="upload", cascade="all, delete-orphan")
 
 
@@ -132,6 +134,7 @@ class Message(Base):
     id = Column(String, primary_key=True, default=lambda: new_id("msg"))
     upload_id = Column(String, ForeignKey("uploads.id"), nullable=False)
     workspace_id = Column(String, ForeignKey("workspaces.id"), nullable=True, index=True)
+    project_id = Column(String, ForeignKey("projects.id"), nullable=True, index=True)
     sender = Column(String, nullable=False, index=True)
     timestamp = Column(DateTime, nullable=False, index=True)
     raw_text = Column(Text, nullable=False)
@@ -150,7 +153,7 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_sender_timestamp", "sender", "timestamp"),
         Index("ix_messages_type_timestamp", "type", "timestamp"),
-        UniqueConstraint("workspace_id", "content_hash", name="uq_message_workspace_hash"),
+        UniqueConstraint("project_id", "content_hash", name="uq_message_project_hash"),
     )
 
 
@@ -165,7 +168,8 @@ class Project(Base):
 
     creator = relationship("User", back_populates="projects")
     workspace = relationship("Workspace", back_populates="projects")
-    canvas = relationship("ProjectCanvas", back_populates="project", uselist=False, cascade="all, delete-orphan")
+    uploads = relationship("Upload", back_populates="project", cascade="all, delete-orphan")
+    canvases = relationship("ProjectCanvas", back_populates="project", cascade="all, delete-orphan")
     items = relationship("ProjectItem", back_populates="project", cascade="all, delete-orphan")
 
 
@@ -173,13 +177,15 @@ class ProjectCanvas(Base):
     __tablename__ = "project_canvas"
 
     id = Column(String, primary_key=True, default=lambda: new_id("cvs"))
-    project_id = Column(String, ForeignKey("projects.id"), nullable=False, unique=True)
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False, index=True)
+    name = Column(String, nullable=False, default="Main canvas")
     nodes = Column(JSON, nullable=False, default=list)
     edges = Column(JSON, nullable=False, default=list)
     frames = Column(JSON, nullable=False, default=list)
     viewport = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
 
-    project = relationship("Project", back_populates="canvas")
+    project = relationship("Project", back_populates="canvases")
     versions = relationship("CanvasVersion", back_populates="canvas", cascade="all, delete-orphan")
 
 
@@ -236,3 +242,36 @@ class ProjectItem(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "message_id", name="uq_project_message"),
     )
+
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+
+    id = Column(String, primary_key=True, default=lambda: new_id("log"))
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    username = Column(String, nullable=False)
+    user_role = Column(String, nullable=True)
+    action = Column(String, nullable=False, index=True)
+    resource_type = Column(String, nullable=True)
+    resource_id = Column(String, nullable=True)
+    resource_name = Column(String, nullable=True)
+    workspace_id = Column(String, ForeignKey("workspaces.id"), nullable=True, index=True)
+    details = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    user = relationship("User")
+    workspace = relationship("Workspace")
+
+
+class DbSnapshot(Base):
+    __tablename__ = "db_snapshots"
+
+    id = Column(String, primary_key=True, default=lambda: new_id("snap"))
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+    kind = Column(String, nullable=False, default="scheduled")  # scheduled | manual
+    backend = Column(String, nullable=False)  # sqlite | postgresql
+    file_name = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    size_bytes = Column(Integer, nullable=False, default=0)
+    stats = Column(JSON, nullable=True)
+    notes = Column(Text, nullable=True)

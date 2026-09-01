@@ -1,4 +1,4 @@
-"""Project AI: canvas JSON + source messages, then LLM (OpenAI / Anthropic / Ollama)."""
+"""Project AI: canvas JSON + source messages, then LLM (OpenRouter / OpenAI / Anthropic / Ollama)."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,10 @@ from typing import Iterator
 
 import httpx
 
+OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-31b-it:free").strip()
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "WhatsApp Strategy Canvas").strip()
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -34,7 +38,8 @@ def local_fallback(canvas: dict, sources: list[dict], question: str) -> str:
         return (
             "This project canvas is empty. Drag chats, links, docs, or reels from the library "
             "onto the board, then ask again.\n\n"
-            "To enable a full LLM, set OPENAI_API_KEY, ANTHROPIC_API_KEY, or run Ollama locally."
+            "To enable a full LLM, set OPENROUTER_API_KEY (recommended), OPENAI_API_KEY, "
+            "ANTHROPIC_API_KEY, or run Ollama locally."
         )
     lines = [
         "No cloud LLM key is configured, so here is a local reading of the board.",
@@ -47,11 +52,19 @@ def local_fallback(canvas: dict, sources: list[dict], question: str) -> str:
         snippet = (item.get("raw_text") or "")[:220]
         lines.append(f"- [{item.get('type')}] {item.get('sender')} - {snippet}")
     lines.append("")
-    lines.append("Set OPENAI_API_KEY or ANTHROPIC_API_KEY, or start Ollama, for drafted replies and strategy synthesis.")
+    lines.append(
+        "Set OPENROUTER_API_KEY for Gemma via OpenRouter, or OPENAI_API_KEY / ANTHROPIC_API_KEY, "
+        "or start Ollama, for drafted replies and strategy synthesis."
+    )
     return "\n".join(lines)
 
 
 def complete(system: str, user: str, canvas: dict, sources: list[dict], question: str) -> str:
+    if OPENROUTER_KEY:
+        try:
+            return _openrouter(system, user)
+        except Exception as exc:
+            return f"OpenRouter error: {exc}\n\n" + local_fallback(canvas, sources, question)
     if OPENAI_KEY:
         try:
             return _openai(system, user)
@@ -66,6 +79,33 @@ def complete(system: str, user: str, canvas: dict, sources: list[dict], question
         return _ollama(system, user)
     except Exception:
         return local_fallback(canvas, sources, question)
+
+
+def _openrouter(system: str, user: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_HTTP_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+    if OPENROUTER_APP_NAME:
+        headers["X-Title"] = OPENROUTER_APP_NAME
+    with httpx.Client(timeout=120) as client:
+        res = client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.3,
+            },
+        )
+        res.raise_for_status()
+        payload = res.json()
+        return payload["choices"][0]["message"]["content"]
 
 
 def _openai(system: str, user: str) -> str:

@@ -1,4 +1,4 @@
-export type Role = "admin" | "member";
+export type Role = "superadmin" | "admin" | "member";
 export type WorkspaceRole = "owner" | "member";
 
 export type UserRecord = {
@@ -6,6 +6,7 @@ export type UserRecord = {
   username: string;
   email?: string | null;
   role: Role;
+  is_super_admin?: boolean;
   created_at?: string | null;
   temporary_password?: string;
 };
@@ -21,6 +22,9 @@ export type WorkspaceRecord = {
   owner_id: string;
   created_at: string | null;
   role: WorkspaceRole | null;
+  project_count?: number;
+  upload_count?: number;
+  message_count?: number;
 };
 
 export type WorkspaceMemberRecord = {
@@ -137,9 +141,17 @@ export type LibraryFilterState = {
   dateTo: string;
 };
 
+export type CanvasSummary = {
+  id: string;
+  name: string;
+  project_id: string;
+  created_at: string | null;
+};
+
 export type UploadRecord = {
   id: string;
   workspace_id?: string | null;
+  project_id?: string | null;
   file_name: string;
   uploaded_by: string;
   uploaded_by_username?: string | null;
@@ -179,6 +191,90 @@ export type ChatEntry = {
 
 export type ProjectDetail = {
   project: ProjectRecord;
-  canvas: CanvasState;
+  canvas: CanvasState & { id?: string | null; name?: string };
+  canvas_id: string;
+  canvases: CanvasSummary[];
+  uploads: UploadRecord[];
   items: MessageRecord[];
+};
+
+export type ActivityLogRecord = {
+  id: string;
+  user_id: string | null;
+  username: string;
+  user_role: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  resource_name: string | null;
+  workspace_id: string | null;
+  details: Record<string, unknown>;
+  created_at: string | null;
+};
+
+export type ActivityLogResponse = {
+  total: number;
+  items: ActivityLogRecord[];
+};
+
+export type DbSnapshotRecord = {
+  id: string;
+  created_at: string | null;
+  kind: string;
+  backend: string;
+  file_name: string;
+  size_bytes: number;
+  stats: Record<string, unknown>;
+  notes: string | null;
+};
+
+export type DbSnapshotResponse = {
+  total: number;
+  items: DbSnapshotRecord[];
+};
+
+export type DbUploadSummary = {
+  id: string;
+  file_name: string;
+  status: string;
+  message_count: number;
+  duplicate_count: number;
+  uploaded_by_username?: string | null;
+  uploaded_at: string | null;
+  chat_name: string | null;
+  error_message: string | null;
+};
+
+export type DbProjectSummary = {
+  id: string;
+  name: string;
+  created_at: string | null;
+  uploads: DbUploadSummary[];
+  message_count: number;
+  canvas_count: number;
+};
+
+export type DbWorkspaceSummary = {
+  id: string;
+  name: string;
+  owner_id: string;
+  owner_username?: string | null;
+  created_at: string | null;
+  project_count: number;
+  upload_count: number;
+  message_count: number;
+  projects: DbProjectSummary[];
+};
+
+export type DbOverview = {
+  backend: string;
+  totals: {
+    workspaces: number;
+    projects: number;
+    uploads: number;
+    messages: number;
+    users: number;
+    members: number;
+  };
+  workspaces: DbWorkspaceSummary[];
 };

@@ -2,48 +2,61 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { describeActivity, roleBadge } from "@/lib/activity";
 import { api, formatWhen, getUser } from "@/lib/api";
 import { getActiveWorkspaceId, loadWorkspaces, workspaceQuery } from "@/lib/workspace";
-import type { SignupCodeRecord, UploadRecord, UserRecord } from "@/lib/types";
+import type { ActivityLogRecord, ActivityLogResponse, SignupCodeRecord, UploadRecord, UserRecord } from "@/lib/types";
 
 export default function AdminPage() {
   const router = useRouter();
   const [users, setUsers] = useState<UserRecord[]>([]);
   const [signupCodes, setSignupCodes] = useState<SignupCodeRecord[]>([]);
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLogRecord[]>([]);
+  const [activityTotal, setActivityTotal] = useState(0);
+  const [allWorkspaces, setAllWorkspaces] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"member" | "admin">("member");
+  const [role, setRole] = useState<"superadmin" | "admin" | "member">("member");
   const [codeNote, setCodeNote] = useState("");
   const [codeUses, setCodeUses] = useState(1);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pwDraft, setPwDraft] = useState<Record<string, string>>({});
+  const [pwBusy, setPwBusy] = useState<Record<string, boolean>>({});
+  const me = getUser();
+  const isSuper = !!me?.is_super_admin;
 
   async function load() {
     const workspaceId = getActiveWorkspaceId();
     const uploadPromise = workspaceId
       ? api<UploadRecord[]>(`/api/uploads?${workspaceQuery()}`)
       : Promise.resolve([] as UploadRecord[]);
-    const [nextUsers, nextCodes, nextUploads] = await Promise.all([
+    const logParams = new URLSearchParams({ limit: "150" });
+    if (!allWorkspaces && workspaceId) logParams.set("workspace_id", workspaceId);
+    const [nextUsers, nextCodes, nextUploads, nextLogs] = await Promise.all([
       api<UserRecord[]>("/api/admin/users"),
       api<SignupCodeRecord[]>("/api/admin/signup-codes"),
       uploadPromise,
+      api<ActivityLogResponse>(`/api/admin/activity-logs?${logParams.toString()}`),
     ]);
     setUsers(nextUsers);
     setSignupCodes(nextCodes);
     setUploads(nextUploads);
+    setActivityLogs(nextLogs.items);
+    setActivityTotal(nextLogs.total);
   }
 
   useEffect(() => {
     const me = getUser();
-    if (me && me.role !== "admin") {
+    if (me && me.role !== "admin" && me.role !== "superadmin" && !me.is_super_admin) {
       router.replace("/");
       return;
     }
     void loadWorkspaces()
       .then(() => load())
       .catch((err) => setError(err instanceof Error ? err.message : "Admin load failed"));
-  }, [router]);
+  }, [router, allWorkspaces]);
 
   async function addMember() {
     if (!email.trim()) return;
@@ -96,10 +109,40 @@ export default function AdminPage() {
       method: "POST",
       body: JSON.stringify({}),
     });
-    setNotice(`New password: ${result.temporary_password}`);
+    setNotice(`New auto-generated password: ${result.temporary_password}`);
+    await load();
   }
 
-  async function changeRole(userId: string, next: "admin" | "member") {
+  async function setPasswordFor(userId: string) {
+    const next = (pwDraft[userId] || "").trim();
+    if (!next) {
+      setNotice("Enter a new password first.");
+      return;
+    }
+    if (next.length < 8) {
+      setNotice("Password must be at least 8 characters.");
+      return;
+    }
+    setPwBusy((current) => ({ ...current, [userId]: true }));
+    try {
+      await api<{ temporary_password: string }>(`/api/admin/users/${userId}/reset-password`, {
+        method: "POST",
+        body: JSON.stringify({ password: next }),
+      });
+      setNotice(`Password updated for the user.`);
+      setPwDraft((current) => {
+        const copy = { ...current };
+        delete copy[userId];
+        return copy;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not set password");
+    } finally {
+      setPwBusy((current) => ({ ...current, [userId]: false }));
+    }
+  }
+
+  async function changeRole(userId: string, next: "superadmin" | "admin" | "member") {
     await api(`/api/admin/users/${userId}`, {
       method: "PATCH",
       body: JSON.stringify({ role: next }),
@@ -122,9 +165,56 @@ export default function AdminPage() {
   return (
     <div className="h-full overflow-auto p-8">
       <h2 className="text-2xl font-semibold">Admin</h2>
-      <p className="mt-1 text-sm text-zinc-600">Team accounts and uploads for the active workspace.</p>
+      <p className="mt-1 text-sm text-zinc-600">Team accounts, uploads, and activity for the workspace.</p>
       {notice ? <p className="mt-4 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{notice}</p> : null}
       {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
+
+      <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold">Activity log</h3>
+            <p className="mt-1 text-sm text-zinc-600">
+              Who did what — workspaces, projects, uploads, invites, and admin actions.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-zinc-600">
+            <input
+              type="checkbox"
+              checked={allWorkspaces}
+              onChange={(event) => setAllWorkspaces(event.target.checked)}
+            />
+            Show all workspaces
+          </label>
+        </div>
+        {activityLogs.length === 0 ? (
+          <p className="mt-4 text-sm text-zinc-500">No activity recorded yet.</p>
+        ) : (
+          <div className="mt-4 max-h-[420px] overflow-auto rounded-lg border border-zinc-100">
+            <ul className="divide-y divide-zinc-100">
+              {activityLogs.map((log) => {
+                const { who, what } = describeActivity(log);
+                return (
+                  <li key={log.id} className="px-4 py-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-xs font-semibold text-emerald-800">{who}</span>
+                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">
+                        {roleBadge(log.user_role)}
+                      </span>
+                      <span className="text-xs text-zinc-400">{formatWhen(log.created_at)}</span>
+                    </div>
+                    <p className="mt-1 font-medium tracking-wide text-zinc-800">{what}</p>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+        {activityTotal > activityLogs.length ? (
+          <p className="mt-2 text-xs text-zinc-500">
+            Showing {activityLogs.length} of {activityTotal} events.
+          </p>
+        ) : null}
+      </section>
 
       <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">Signup codes</h3>
@@ -198,7 +288,10 @@ export default function AdminPage() {
 
       <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">Team management</h3>
-        <p className="mt-1 text-sm text-zinc-600">Or create a login directly for someone on your team.</p>
+        <p className="mt-1 text-sm text-zinc-600">
+          Create a login directly for someone on your team. Roles: <span className="font-medium">superadmin</span> (you) →{" "}
+          <span className="font-medium">admin</span> → <span className="font-medium">member</span>.
+        </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <input
             type="email"
@@ -211,16 +304,17 @@ export default function AdminPage() {
             type="password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            placeholder="Password (optional)"
-            className="rounded-md border border-zinc-300 px-3 py-2 text-sm"
+            placeholder="Password (optional — auto-generates if blank)"
+            className="min-w-56 flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm"
           />
           <select
             value={role}
-            onChange={(event) => setRole(event.target.value as "member" | "admin")}
+            onChange={(event) => setRole(event.target.value as "superadmin" | "admin" | "member")}
             className="rounded-md border border-zinc-300 px-2 py-2 text-sm"
           >
             <option value="member">member</option>
             <option value="admin">admin</option>
+            {isSuper ? <option value="superadmin">superadmin</option> : null}
           </select>
           <button type="button" onClick={() => void addMember()} className="rounded-md bg-zinc-900 px-3 py-2 text-sm text-white">
             Add member
@@ -231,31 +325,74 @@ export default function AdminPage() {
             <tr>
               <th className="py-2">User</th>
               <th>Role</th>
+              <th>Set / reset password</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {users.map((user) => (
-              <tr key={user.id} className="border-t border-zinc-100">
-                <td className="py-2">{user.email || user.username}</td>
-                <td className="capitalize">{user.role}</td>
-                <td className="space-x-3 text-right">
-                  <button type="button" onClick={() => void resetPassword(user.id)} className="text-emerald-700">
-                    Reset password
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void changeRole(user.id, user.role === "admin" ? "member" : "admin")}
-                    className="text-zinc-600"
-                  >
-                    Change role
-                  </button>
-                  <button type="button" onClick={() => void removeUser(user.id)} className="text-red-600">
-                    Remove
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {users.map((user) => {
+              const canEditRole = isSuper || user.role !== "superadmin";
+              return (
+                <tr key={user.id} className="border-t border-zinc-100 align-top">
+                  <td className="py-2">
+                    <p className="font-medium">{user.email || user.username}</p>
+                    {user.is_super_admin ? (
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700">super admin</span>
+                    ) : null}
+                  </td>
+                  <td className="py-2">
+                    <select
+                      value={user.role}
+                      disabled={!canEditRole}
+                      onChange={(event) => void changeRole(user.id, event.target.value as "superadmin" | "admin" | "member")}
+                      className="rounded-md border border-zinc-300 px-2 py-1 text-xs disabled:opacity-60"
+                    >
+                      <option value="member">member</option>
+                      <option value="admin">admin</option>
+                      <option value="superadmin" disabled={!isSuper}>superadmin</option>
+                    </select>
+                  </td>
+                  <td className="py-2">
+                    <div className="flex flex-wrap items-center gap-1">
+                      <input
+                        type="password"
+                        value={pwDraft[user.id] || ""}
+                        onChange={(event) => setPwDraft((current) => ({ ...current, [user.id]: event.target.value }))}
+                        placeholder="New password"
+                        className="min-w-40 rounded-md border border-zinc-300 px-2 py-1 text-xs"
+                      />
+                      <button
+                        type="button"
+                        disabled={!!pwBusy[user.id]}
+                        onClick={() => void setPasswordFor(user.id)}
+                        className="rounded-md bg-zinc-900 px-2 py-1 text-xs text-white disabled:opacity-50"
+                      >
+                        {pwBusy[user.id] ? "Saving…" : "Set"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void resetPassword(user.id)}
+                        className="rounded-md border border-zinc-300 px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-50"
+                        title="Generate a random password"
+                      >
+                        Auto-reset
+                      </button>
+                    </div>
+                  </td>
+                  <td className="py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => void removeUser(user.id)}
+                      disabled={user.is_super_admin}
+                      className="text-red-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={user.is_super_admin ? "Super admins cannot be removed here" : "Remove user"}
+                    >
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </section>
