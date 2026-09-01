@@ -126,6 +126,10 @@ Set:
 APP_DOMAIN=app.kibookal.tech
 ACME_EMAIL=you@kibookal.tech
 JWT_SECRET=<long-random-secret>
+POSTGRES_PASSWORD=<strong-db-password>
+ADMIN_EMAIL=admin@kibookal.tech
+ADMIN_PASSWORD=<strong-app-password>
+ADMIN_USERNAME=admin
 ```
 
 Generate a secret:
@@ -176,16 +180,14 @@ docker compose restart api web
 docker compose logs -f api
 docker compose logs -f web
 
-# Restart after code update
+# Restart after code update (existing VPS)
 git pull
-docker compose build
-docker compose up -d
+chmod +x deploy/upgrade-postgres.sh
+./deploy/upgrade-postgres.sh
 
-# Stop
-docker compose down
-
-# Backup SQLite + uploads (run on VPS)
-docker compose exec api tar -czf - -C /app local_data > backup-$(date +%F).tar.gz
+# Backup PostgreSQL + uploads (run on VPS)
+docker compose exec -T postgres pg_dump -U whatsapp whatsapp > db-backup-$(date +%F).sql
+docker compose exec api tar -czf - -C /app local_data > files-backup-$(date +%F).tar.gz
 ```
 
 Enable **daily** backups in hPanel: VPS → Backups → Backup schedule → Daily.
@@ -198,6 +200,13 @@ Allow only what you need:
 - TCP 80, 443 (web)
 
 Do not expose 8000 or 3000 publicly; Caddy is the only public entry point.
+
+## Data model (per user)
+
+- Each **user** gets a private workspace on first login (or when an admin creates their account).
+- **Workspaces** isolate uploads, messages, projects, tags, and canvas data.
+- Users can also join shared workspaces via **invite links**.
+- PostgreSQL stores relational data; uploaded files and extracted media stay in the `app_data` volume.
 
 ## Troubleshooting
 
