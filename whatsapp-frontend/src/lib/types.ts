@@ -351,3 +351,103 @@ export type ControlOverview = {
   };
   users: ControlUserRow[];
 };
+
+export type ControlTables = {
+  generated_at: string;
+  users: Array<{
+    id: string;
+    username: string;
+    email: string | null;
+    role: string;
+    is_super_admin: boolean;
+    created_at: string | null;
+    workspace_count: number;
+    projects_created: number;
+    uploads_count: number;
+  }>;
+  workspaces: Array<{
+    id: string;
+    name: string;
+    owner_id: string;
+    owner_username?: string | null;
+    owner_email?: string | null;
+    member_count: number;
+    project_count: number;
+    upload_count: number;
+    created_at: string | null;
+  }>;
+  workspace_members: Array<{
+    id: string;
+    workspace_id: string;
+    workspace_name: string | null;
+    user_id: string;
+    username?: string | null;
+    email?: string | null;
+    role: string;
+    created_at: string | null;
+  }>;
+  projects: Array<{
+    id: string;
+    name: string;
+    workspace_id: string | null;
+    workspace_name: string | null;
+    created_by: string;
+    created_by_username?: string | null;
+    created_at: string | null;
+    canvas_count: number;
+    upload_count: number;
+  }>;
+  canvases: Array<ControlCanvasSummary & { project_name: string | null; workspace_id: string | null }>;
+  uploads: UploadRecord[];
+  messages: {
+    total: number;
+    offset: number;
+    limit: number;
+    items: Array<{
+      id: string;
+      upload_id: string;
+      upload_file: string | null;
+      project_id: string | null;
+      project_name: string | null;
+      workspace_id: string | null;
+      sender: string;
+      timestamp: string | null;
+      type: string;
+      chat_name: string | null;
+      preview: string;
+      has_media: boolean;
+    }>;
+  };
+  tags: Array<{
+    id: string;
+    workspace_id: string;
+    workspace_name: string | null;
+    name: string;
+    created_at: string | null;
+  }>;
+  signup_codes: Array<{
+    id: string;
+    code: string;
+    note: string | null;
+    max_uses: number;
+    used_count: number;
+    revoked: boolean;
+    workspace_id: string | null;
+    workspace_name: string | null;
+    created_by?: string | null;
+    created_at: string | null;
+  }>;
+  activity_logs: {
+    total: number;
+    items: Array<{
+      id: string;
+      username: string;
+      user_role: string | null;
+      action: string;
+      resource_type: string | null;
+      resource_name: string | null;
+      workspace_id: string | null;
+      created_at: string | null;
+    }>;
+  };
+};

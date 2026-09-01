@@ -10,9 +10,12 @@ from sqlalchemy.orm import Session
 
 from app.auth import is_super_admin, serialize_user
 from db.models import (
+    ActivityLog,
     Message,
     Project,
     ProjectCanvas,
+    SignupCode,
+    Tag,
     Upload,
     User,
     Workspace,
@@ -267,3 +270,175 @@ def export_user_backup(db: Session, user_id: str, *, include_messages: bool = Fa
 def export_user_backup_json(db: Session, user_id: str, *, include_messages: bool = False) -> str:
     payload = export_user_backup(db, user_id, include_messages=include_messages)
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def build_control_tables(db: Session, viewer: User, *, message_limit: int = 100, message_offset: int = 0) -> dict:
+    users = db.query(User).order_by(User.username.asc()).all()
+    user_map = {item.id: item for item in users}
+    username_map = {item.id: item.username for item in users}
+    email_map = {item.id: item.email for item in users}
+
+    workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
+    ws_map = {item.id: item for item in workspaces}
+
+    members = db.query(WorkspaceMember).order_by(WorkspaceMember.created_at.asc()).all()
+    projects = db.query(Project).order_by(Project.created_at.desc()).all()
+    canvases = db.query(ProjectCanvas).order_by(ProjectCanvas.created_at.asc()).all()
+    uploads = db.query(Upload).order_by(Upload.uploaded_at.desc()).all()
+    tags = db.query(Tag).order_by(Tag.name.asc()).all()
+    signup_codes = db.query(SignupCode).order_by(SignupCode.created_at.desc()).all()
+
+    message_total = db.query(Message).count()
+    messages = (
+        db.query(Message)
+        .order_by(Message.timestamp.desc())
+        .offset(max(message_offset, 0))
+        .limit(min(message_limit, 500))
+        .all()
+    )
+
+    activity_total = db.query(ActivityLog).count()
+    activity_logs = (
+        db.query(ActivityLog)
+        .order_by(ActivityLog.created_at.desc())
+        .limit(200)
+        .all()
+    )
+
+    upload_map = {item.id: item for item in uploads}
+    project_map = {item.id: item for item in projects}
+
+    member_counts: dict[str, int] = defaultdict(int)
+    for member in members:
+        member_counts[member.workspace_id] += 1
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "users": [
+            {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "is_super_admin": is_super_admin(user),
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "workspace_count": sum(1 for m in members if m.user_id == user.id),
+                "projects_created": sum(1 for p in projects if p.created_by == user.id),
+                "uploads_count": sum(1 for u in uploads if u.uploaded_by == user.id),
+            }
+            for user in users
+        ],
+        "workspaces": [
+            {
+                "id": ws.id,
+                "name": ws.name,
+                "owner_id": ws.owner_id,
+                "owner_username": username_map.get(ws.owner_id),
+                "owner_email": email_map.get(ws.owner_id),
+                "member_count": member_counts.get(ws.id, 0),
+                "project_count": sum(1 for p in projects if p.workspace_id == ws.id),
+                "upload_count": sum(1 for u in uploads if u.workspace_id == ws.id),
+                "created_at": ws.created_at.isoformat() if ws.created_at else None,
+            }
+            for ws in workspaces
+        ],
+        "workspace_members": [
+            {
+                "id": member.id,
+                "workspace_id": member.workspace_id,
+                "workspace_name": ws_map.get(member.workspace_id).name if ws_map.get(member.workspace_id) else None,
+                "user_id": member.user_id,
+                "username": username_map.get(member.user_id),
+                "email": email_map.get(member.user_id),
+                "role": member.role,
+                "created_at": member.created_at.isoformat() if member.created_at else None,
+            }
+            for member in members
+        ],
+        "projects": [
+            {
+                "id": project.id,
+                "name": project.name,
+                "workspace_id": project.workspace_id,
+                "workspace_name": ws_map.get(project.workspace_id or "").name if project.workspace_id and ws_map.get(project.workspace_id) else None,
+                "created_by": project.created_by,
+                "created_by_username": username_map.get(project.created_by),
+                "created_at": project.created_at.isoformat() if project.created_at else None,
+                "canvas_count": sum(1 for c in canvases if c.project_id == project.id),
+                "upload_count": sum(1 for u in uploads if u.project_id == project.id),
+            }
+            for project in projects
+        ],
+        "canvases": [
+            {
+                **_canvas_summary(canvas),
+                "project_name": project_map.get(canvas.project_id).name if project_map.get(canvas.project_id) else None,
+                "workspace_id": project_map.get(canvas.project_id).workspace_id if project_map.get(canvas.project_id) else None,
+            }
+            for canvas in canvases
+        ],
+        "uploads": [_upload_row(item, username_map) for item in uploads],
+        "messages": {
+            "total": message_total,
+            "offset": message_offset,
+            "limit": message_limit,
+            "items": [
+                {
+                    "id": msg.id,
+                    "upload_id": msg.upload_id,
+                    "upload_file": upload_map.get(msg.upload_id).file_name if upload_map.get(msg.upload_id) else None,
+                    "project_id": msg.project_id,
+                    "project_name": project_map.get(msg.project_id or "").name if msg.project_id and project_map.get(msg.project_id) else None,
+                    "workspace_id": msg.workspace_id,
+                    "sender": msg.sender,
+                    "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                    "type": msg.type,
+                    "chat_name": msg.chat_name,
+                    "preview": (msg.raw_text or "")[:120],
+                    "has_media": bool(msg.extracted_filename or msg.extracted_url),
+                }
+                for msg in messages
+            ],
+        },
+        "tags": [
+            {
+                "id": tag.id,
+                "workspace_id": tag.workspace_id,
+                "workspace_name": ws_map.get(tag.workspace_id).name if ws_map.get(tag.workspace_id) else None,
+                "name": tag.name,
+                "created_at": tag.created_at.isoformat() if tag.created_at else None,
+            }
+            for tag in tags
+        ],
+        "signup_codes": [
+            {
+                "id": code.id,
+                "code": code.code,
+                "note": code.note,
+                "max_uses": code.max_uses,
+                "used_count": code.used_count,
+                "revoked": bool(code.revoked),
+                "workspace_id": code.workspace_id,
+                "workspace_name": ws_map.get(code.workspace_id or "").name if code.workspace_id and ws_map.get(code.workspace_id) else None,
+                "created_by": username_map.get(code.created_by),
+                "created_at": code.created_at.isoformat() if code.created_at else None,
+            }
+            for code in signup_codes
+        ],
+        "activity_logs": {
+            "total": activity_total,
+            "items": [
+                {
+                    "id": log.id,
+                    "username": log.username,
+                    "user_role": log.user_role,
+                    "action": log.action,
+                    "resource_type": log.resource_type,
+                    "resource_name": log.resource_name,
+                    "workspace_id": log.workspace_id,
+                    "created_at": log.created_at.isoformat() if log.created_at else None,
+                }
+                for log in activity_logs
+            ],
+        },
+    }

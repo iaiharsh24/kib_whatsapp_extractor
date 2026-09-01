@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import ControlDataTables from "@/components/ControlDataTables";
 import { api, downloadAuthenticated, formatWhen, getUser } from "@/lib/api";
 import { refreshWorkspaces, setActiveWorkspaceId } from "@/lib/workspace";
 import type {
@@ -171,6 +172,7 @@ export default function ControlPage() {
   const [exportBusy, setExportBusy] = useState<string | null>(null);
   const [expandedUsers, setExpandedUsers] = useState<Set<string>>(new Set());
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
+  const [mainTab, setMainTab] = useState<"overview" | "tables" | "backups">("tables");
 
   async function load() {
     const [nextControl, nextDb, nextSnapshots] = await Promise.all([
@@ -273,7 +275,42 @@ export default function ControlPage() {
         </div>
       </section>
 
-      <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5">
+      <div className="mt-4 flex flex-wrap gap-2 border-b border-zinc-200 pb-3">
+        {(
+          [
+            ["tables", "All data tables"],
+            ["overview", "Users & backups"],
+            ["backups", "DB snapshots"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setMainTab(id)}
+            className={`rounded-md px-4 py-2 text-sm font-medium ${
+              mainTab === id ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mainTab === "tables" ? (
+        <section className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
+          <h3 className="font-semibold">Database tables</h3>
+          <p className="mt-1 text-sm text-zinc-600">
+            Every row in the platform — users, workspaces, projects, canvases, uploads, messages, and more.
+          </p>
+          <div className="mt-4">
+            <ControlDataTables />
+          </div>
+        </section>
+      ) : null}
+
+      {mainTab === "overview" ? (
+        <>
+      <section className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">All users ({control.users.length})</h3>
         <p className="mt-1 text-sm text-zinc-600">
           Expand a user to see workspaces, projects, canvases, and uploads. Use Backup JSON for canvases + metadata, or
@@ -291,56 +328,6 @@ export default function ControlPage() {
             />
           ))}
         </div>
-      </section>
-
-      <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5">
-        <h3 className="font-semibold">Database snapshots ({dbOverview.backend})</h3>
-        <p className="mt-1 text-sm text-zinc-600">
-          Automatic backup every 6 hours. {snapshotTotal} snapshot{snapshotTotal === 1 ? "" : "s"} on record.
-        </p>
-        {snapshots.length === 0 ? (
-          <p className="mt-3 text-sm text-zinc-500">No snapshots yet.</p>
-        ) : (
-          <table className="mt-4 w-full text-left text-sm">
-            <thead className="text-xs uppercase text-zinc-500">
-              <tr>
-                <th className="py-2">When</th>
-                <th>Kind</th>
-                <th>Size</th>
-                <th>Stats</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {snapshots.map((snap) => {
-                const stats = snap.stats || {};
-                const statLine = [
-                  `users ${stats.users ?? "?"}`,
-                  `projects ${stats.projects ?? "?"}`,
-                  `uploads ${stats.uploads ?? "?"}`,
-                  `messages ${stats.messages ?? "?"}`,
-                ].join(" · ");
-                return (
-                  <tr key={snap.id} className="border-t border-zinc-100">
-                    <td className="py-2">{formatWhen(snap.created_at)}</td>
-                    <td>{snap.kind}</td>
-                    <td>{formatBytes(snap.size_bytes)}</td>
-                    <td className="text-[11px] text-zinc-500">{statLine}</td>
-                    <td className="text-right">
-                      <a
-                        href={`/api/admin/db/snapshots/${snap.id}/download`}
-                        className="text-emerald-700 hover:underline"
-                        download={snap.file_name}
-                      >
-                        Download
-                      </a>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
       </section>
 
       <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5">
@@ -394,6 +381,60 @@ export default function ControlPage() {
           ))}
         </div>
       </section>
+        </>
+      ) : null}
+
+      {mainTab === "backups" ? (
+      <section className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
+        <h3 className="font-semibold">Database snapshots ({dbOverview.backend})</h3>
+        <p className="mt-1 text-sm text-zinc-600">
+          Automatic backup every 6 hours. {snapshotTotal} snapshot{snapshotTotal === 1 ? "" : "s"} on record.
+        </p>
+        {snapshots.length === 0 ? (
+          <p className="mt-3 text-sm text-zinc-500">No snapshots yet.</p>
+        ) : (
+          <table className="mt-4 w-full text-left text-sm">
+            <thead className="text-xs uppercase text-zinc-500">
+              <tr>
+                <th className="py-2">When</th>
+                <th>Kind</th>
+                <th>Size</th>
+                <th>Stats</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {snapshots.map((snap) => {
+                const stats = snap.stats || {};
+                const statLine = [
+                  `users ${stats.users ?? "?"}`,
+                  `projects ${stats.projects ?? "?"}`,
+                  `uploads ${stats.uploads ?? "?"}`,
+                  `messages ${stats.messages ?? "?"}`,
+                ].join(" · ");
+                return (
+                  <tr key={snap.id} className="border-t border-zinc-100">
+                    <td className="py-2">{formatWhen(snap.created_at)}</td>
+                    <td>{snap.kind}</td>
+                    <td>{formatBytes(snap.size_bytes)}</td>
+                    <td className="text-[11px] text-zinc-500">{statLine}</td>
+                    <td className="text-right">
+                      <a
+                        href={`/api/admin/db/snapshots/${snap.id}/download`}
+                        className="text-emerald-700 hover:underline"
+                        download={snap.file_name}
+                      >
+                        Download
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+      ) : null}
     </div>
   );
 }

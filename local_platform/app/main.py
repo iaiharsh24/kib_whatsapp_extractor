@@ -42,7 +42,7 @@ from app.auth import (
     SUPER_ADMIN_EMAILS,
     visible_users_for_admin,
 )
-from app.admin_control import build_control_overview, export_user_backup_json
+from app.admin_control import build_control_overview, build_control_tables, export_user_backup_json
 from app.backups import run_backup, serialize_snapshot, start_backup_scheduler
 from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
 from app.llm import build_prompt, complete
@@ -2074,6 +2074,17 @@ async def list_activity_logs(
 async def control_overview(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     """User-centric view of every account, project, canvas, and upload."""
     return build_control_overview(db, admin)
+
+
+@app.get("/api/admin/control/tables")
+async def control_tables(
+    message_limit: int = Query(100, ge=1, le=500),
+    message_offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    """Flat tabular dump of all platform data for the super-admin control center."""
+    return build_control_tables(db, admin, message_limit=message_limit, message_offset=message_offset)
 
 
 @app.get("/api/admin/control/users/{user_id}/export")
