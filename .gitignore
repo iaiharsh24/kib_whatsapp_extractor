@@ -24,6 +24,12 @@ whatsapp-frontend/.vercel/
 # Local runtime data (SQLite, uploads, extracted zips)
 local_data/
 
+# Off-server backup copies (contain user data — never commit)
+offsite-backups/
+
+# One-off deploy scripts (may contain secrets — delete after use)
+deploy/_*.py
+
 # OS / editor
 .DS_Store
 Thumbs.db
