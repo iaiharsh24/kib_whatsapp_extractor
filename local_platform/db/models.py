@@ -122,7 +122,7 @@ class Message(Base):
     extracted_filename = Column(String, nullable=True)
     context_before = Column(Text, nullable=True)
     context_after = Column(Text, nullable=True)
-    content_hash = Column(String, nullable=False, unique=True, index=True)
+    content_hash = Column(String, nullable=False, index=True)
     chat_name = Column(String, nullable=True, index=True)
     tags = Column(JSON, nullable=True)
     link_preview = Column(JSON, nullable=True)
@@ -132,6 +132,7 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_sender_timestamp", "sender", "timestamp"),
         Index("ix_messages_type_timestamp", "type", "timestamp"),
+        UniqueConstraint("workspace_id", "content_hash", name="uq_message_workspace_hash"),
     )
 
 

@@ -18,8 +18,9 @@ from app.zip_extract import (
     lookup_media,
     looks_like_zip,
 )
-from db import SessionLocal
+from db import SessionLocal, engine
 from db.models import Message, Upload, new_id
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 BATCH = 200
@@ -68,22 +69,38 @@ def _attach_local_file(parsed: dict, upload_id: str, media_index: dict[str, Path
     return parsed
 
 
-def _existing_hashes(db, hashes: list[str]) -> set[str]:
+def _existing_hashes(db, workspace_id: str | None, hashes: list[str]) -> set[str]:
+    if not workspace_id or not hashes:
+        return set()
     found: set[str] = set()
     for index in range(0, len(hashes), 400):
         chunk = hashes[index : index + 400]
         found.update(
             item[0]
-            for item in db.query(Message.content_hash).filter(Message.content_hash.in_(chunk)).all()
+            for item in db.query(Message.content_hash)
+            .filter(Message.workspace_id == workspace_id, Message.content_hash.in_(chunk))
+            .all()
         )
     return found
 
 
+def _insert_messages_ignore(db, rows: list[dict]) -> None:
+    if not rows:
+        return
+    if engine.dialect.name == "postgresql":
+        stmt = pg_insert(Message).on_conflict_do_nothing(constraint="uq_message_workspace_hash")
+    else:
+        stmt = sqlite_insert(Message).on_conflict_do_nothing(index_elements=["workspace_id", "content_hash"])
+    db.execute(stmt, rows)
+
+
 def _flush(db, batch: list[dict]) -> tuple[int, int]:
-    """Insert new rows, skipping duplicates by content hash. Returns (inserted, duplicates)."""
+    """Insert new rows, skipping duplicates by workspace + content hash."""
     total = len(batch)
     unique: dict[str, dict] = {}
     for row in batch:
+        if not row.get("workspace_id"):
+            continue
         unique[row["content_hash"]] = row
     rows = []
     for row in unique.values():
@@ -92,20 +109,20 @@ def _flush(db, batch: list[dict]) -> tuple[int, int]:
         rows.append(payload)
     if not rows:
         return 0, total
-    existing = _existing_hashes(db, [row["content_hash"] for row in rows])
+    workspace_id = rows[0]["workspace_id"]
+    existing = _existing_hashes(db, workspace_id, [row["content_hash"] for row in rows])
     new_rows = [row for row in rows if row["content_hash"] not in existing]
     if not new_rows:
         return 0, total
-    db.execute(
-        sqlite_insert(Message).on_conflict_do_nothing(index_elements=["content_hash"]),
-        new_rows,
-    )
+    _insert_messages_ignore(db, new_rows)
     db.flush()
     inserted: list[Message] = []
     hashes = [row["content_hash"] for row in new_rows]
     for index in range(0, len(hashes), 400):
         inserted.extend(
-            db.query(Message).filter(Message.content_hash.in_(hashes[index : index + 400])).all()
+            db.query(Message)
+            .filter(Message.workspace_id == workspace_id, Message.content_hash.in_(hashes[index : index + 400]))
+            .all()
         )
     upsert_messages(inserted)
     return len(new_rows), total - len(new_rows)

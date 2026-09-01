@@ -29,7 +29,8 @@ from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
 from app.vectors import delete_upload_vectors
 from app.zip_extract import delete_upload_files, find_extracted_file
-from db import DB_PATH, create_tables, get_db, seed_local_defaults
+from db import DB_BACKEND, DB_PATH, DATABASE_URL, create_tables, get_db, seed_local_defaults
+from db.workspaces import ensure_personal_workspace
 from db.models import (
     CanvasVersion,
     Message,
@@ -369,7 +370,13 @@ async def startup():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "mode": "local", "db": "sqlite", "db_path": DB_PATH}
+    return {
+        "status": "healthy",
+        "mode": "local",
+        "db": DB_BACKEND,
+        "db_path": DB_PATH if DB_BACKEND == "sqlite" else None,
+        "database_url": DATABASE_URL.split("@")[-1] if DATABASE_URL else None,
+    }
 
 
 @app.post("/api/auth/login")
@@ -382,6 +389,8 @@ async def login(body: LoginBody, db: Session = Depends(get_db)):
     )
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    ensure_personal_workspace(db, user)
+    db.commit()
     return {"token": make_token(user), "user": serialize_user(user)}
 
 
@@ -630,6 +639,7 @@ async def accept_invite(
     if not member:
         db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role=invite.role))
         invite.used_count = (invite.used_count or 0) + 1
+    ensure_personal_workspace(db, user)
     db.commit()
     db.refresh(user)
     role = get_workspace_role(workspace.id, user.id, db) or invite.role
@@ -1032,6 +1042,8 @@ async def get_message(message_id: str, db: Session = Depends(get_db), user: User
     message = db.query(Message).filter(Message.id == message_id).first()
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
+    if message.workspace_id:
+        require_workspace_member(message.workspace_id, user, db)
     return serialize_message(message)
 
 
@@ -1045,6 +1057,8 @@ async def patch_message_tags(
     message = db.query(Message).filter(Message.id == message_id).first()
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
+    if message.workspace_id:
+        require_workspace_member(message.workspace_id, user, db)
     kept = [item for item in (message.tags or []) if isinstance(item, str) and item.lower() in TYPE_TAGS]
     message.tags = kept + clean_user_tags(body.tags)
     db.commit()
@@ -1440,6 +1454,8 @@ async def add_user(body: UserCreate, db: Session = Depends(get_db), admin: User 
     temp = body.password or secrets.token_urlsafe(8)
     user = User(username=username, email=email, password_hash=hash_password(temp), role=body.role)
     db.add(user)
+    db.flush()
+    ensure_personal_workspace(db, user)
     db.commit()
     db.refresh(user)
     data = serialize_user(user)

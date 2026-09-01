@@ -23,6 +23,14 @@ if [ -z "${JWT_SECRET:-}" ]; then
   JWT_SECRET="$(openssl rand -hex 32)"
 fi
 
+if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+  POSTGRES_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)"
+  GENERATED_DB_PASSWORD=1
+fi
+
+POSTGRES_DB="${POSTGRES_DB:-whatsapp}"
+POSTGRES_USER="${POSTGRES_USER:-whatsapp}"
+
 echo "==> Installing Docker (if needed)..."
 if ! command -v docker >/dev/null 2>&1; then
   sudo apt-get update
@@ -48,6 +56,9 @@ cat > .env <<EOF
 APP_DOMAIN=$APP_DOMAIN
 ACME_EMAIL=$ACME_EMAIL
 JWT_SECRET=$JWT_SECRET
+POSTGRES_DB=$POSTGRES_DB
+POSTGRES_USER=$POSTGRES_USER
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 ADMIN_EMAIL=$ADMIN_EMAIL
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 ADMIN_USERNAME=$ADMIN_USERNAME
@@ -78,7 +89,11 @@ else
   echo " Password: (value from ADMIN_PASSWORD)"
 fi
 echo ""
-echo " Database: Docker volume app_data -> /app/local_data/strategy.db"
+echo " Database: PostgreSQL (Docker volume postgres_data)"
+if [ "${GENERATED_DB_PASSWORD:-0}" = "1" ]; then
+  echo " DB pass:  $POSTGRES_PASSWORD  (save this now)"
+fi
+echo " Files:    Docker volume app_data -> uploads + extracted media"
 echo " Logs:     docker compose logs -f"
 echo " Backup:   docker compose exec api tar -czf - -C /app local_data > backup.tar.gz"
 echo "=============================================="

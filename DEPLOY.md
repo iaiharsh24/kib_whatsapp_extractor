@@ -9,7 +9,7 @@ Deploy the WhatsApp Strategy Canvas to a Hostinger KVM VPS with Docker Compose, 
 | Tool type | Internal web app (library + strategy canvas) |
 | Backend | Python 3.11, FastAPI, Uvicorn |
 | Frontend | Next.js 16 (React) |
-| Database | SQLite file (`/app/local_data/strategy.db` in container) |
+| Database | PostgreSQL 16 (`postgres_data` volume) + files in `app_data` |
 | API port (internal) | 8000 |
 | Web port (internal) | 3000 |
 | Public ports | 80, 443 (Caddy) |

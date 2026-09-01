@@ -1,7 +1,8 @@
-"""SQLite session, schema create, and default admin seed."""
+"""Database session, schema create, and default admin seed."""
 import os
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
+
 from .models import Base, Message, Project, ProjectCanvas, Upload, User, Workspace, WorkspaceMember
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9,14 +10,20 @@ DB_PATH = os.getenv(
     "WA_DATA_DB_PATH",
     os.path.join(_PROJECT_ROOT, "local_data", "strategy.db"),
 )
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
-engine = create_engine(
-    f"sqlite+pysqlite:///{DB_PATH}",
-    echo=False,
-    future=True,
-    connect_args={"check_same_thread": False},
-)
+if DATABASE_URL:
+    engine = create_engine(DATABASE_URL, echo=False, future=True, pool_pre_ping=True)
+    DB_BACKEND = "postgresql"
+else:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    engine = create_engine(
+        f"sqlite+pysqlite:///{DB_PATH}",
+        echo=False,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    DB_BACKEND = "sqlite"
 
 
 def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
@@ -25,7 +32,9 @@ def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
     cursor.close()
 
 
-event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+if DB_BACKEND == "sqlite":
+    event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -37,48 +46,96 @@ def get_db():
         db.close()
 
 
-def create_tables():
-    Base.metadata.create_all(bind=engine)
-    _ensure_columns()
-    print(f"Tables created at: {DB_PATH}")
+def _table_columns(conn, table_name: str) -> set[str]:
+    return {column["name"] for column in inspect(conn).get_columns(table_name)}
 
 
 def _ensure_columns():
-    from sqlalchemy import text
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    if not existing_tables:
+        return
 
     with engine.begin() as conn:
-        rows = conn.execute(text("PRAGMA table_info(messages)")).fetchall()
-        names = {row[1] for row in rows}
-        if "link_preview" not in names:
-            conn.execute(text("ALTER TABLE messages ADD COLUMN link_preview JSON"))
-        if "workspace_id" not in names:
-            conn.execute(text("ALTER TABLE messages ADD COLUMN workspace_id VARCHAR"))
+        if "messages" in existing_tables:
+            names = _table_columns(conn, "messages")
+            if "link_preview" not in names:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN link_preview JSON"))
+            if "workspace_id" not in names:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN workspace_id VARCHAR"))
 
-        canvas_rows = conn.execute(text("PRAGMA table_info(project_canvas)")).fetchall()
-        canvas_names = {row[1] for row in canvas_rows}
-        if "viewport" not in canvas_names:
-            conn.execute(text("ALTER TABLE project_canvas ADD COLUMN viewport JSON"))
+        if "project_canvas" in existing_tables:
+            canvas_names = _table_columns(conn, "project_canvas")
+            if "viewport" not in canvas_names:
+                conn.execute(text("ALTER TABLE project_canvas ADD COLUMN viewport JSON"))
 
-        user_rows = conn.execute(text("PRAGMA table_info(users)")).fetchall()
-        user_names = {row[1] for row in user_rows}
-        if "email" not in user_names:
-            conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR"))
+        if "users" in existing_tables:
+            user_names = _table_columns(conn, "users")
+            if "email" not in user_names:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR"))
 
-        upload_rows = conn.execute(text("PRAGMA table_info(uploads)")).fetchall()
-        upload_names = {row[1] for row in upload_rows}
-        if "workspace_id" not in upload_names:
-            conn.execute(text("ALTER TABLE uploads ADD COLUMN workspace_id VARCHAR"))
-        if "duplicate_count" not in upload_names:
-            conn.execute(text("ALTER TABLE uploads ADD COLUMN duplicate_count INTEGER DEFAULT 0"))
+        if "uploads" in existing_tables:
+            upload_names = _table_columns(conn, "uploads")
+            if "workspace_id" not in upload_names:
+                conn.execute(text("ALTER TABLE uploads ADD COLUMN workspace_id VARCHAR"))
+            if "duplicate_count" not in upload_names:
+                conn.execute(text("ALTER TABLE uploads ADD COLUMN duplicate_count INTEGER DEFAULT 0"))
 
-        project_rows = conn.execute(text("PRAGMA table_info(projects)")).fetchall()
-        project_names = {row[1] for row in project_rows}
-        if "workspace_id" not in project_names:
-            conn.execute(text("ALTER TABLE projects ADD COLUMN workspace_id VARCHAR"))
+        if "projects" in existing_tables:
+            project_names = _table_columns(conn, "projects")
+            if "workspace_id" not in project_names:
+                conn.execute(text("ALTER TABLE projects ADD COLUMN workspace_id VARCHAR"))
+
+    _ensure_message_hash_index()
+
+
+def _ensure_message_hash_index():
+    """Move dedupe from global content_hash to per-workspace (workspace_id, content_hash)."""
+    inspector = inspect(engine)
+    if "messages" not in inspector.get_table_names():
+        return
+
+    indexes = {item["name"]: item for item in inspector.get_indexes("messages")}
+    uniques = {item["name"]: item for item in inspector.get_unique_constraints("messages")}
+    has_workspace_hash = any(
+        set(item.get("column_names") or []) == {"workspace_id", "content_hash"}
+        for item in (*indexes.values(), *uniques.values())
+    )
+    if has_workspace_hash:
+        return
+
+    with engine.begin() as conn:
+        if DB_BACKEND == "sqlite":
+            for name, meta in indexes.items():
+                if meta.get("unique") and set(meta.get("column_names") or []) == {"content_hash"}:
+                    conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_workspace_hash "
+                    "ON messages (workspace_id, content_hash)"
+                )
+            )
+        else:
+            conn.execute(text("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_content_hash_key"))
+            conn.execute(text("DROP INDEX IF EXISTS ix_messages_content_hash"))
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_workspace_hash "
+                    "ON messages (workspace_id, content_hash)"
+                )
+            )
+
+
+def create_tables():
+    Base.metadata.create_all(bind=engine)
+    _ensure_columns()
+    location = DATABASE_URL.split("@")[-1] if DATABASE_URL else DB_PATH
+    print(f"Tables created ({DB_BACKEND}) at: {location}")
 
 
 def seed_local_defaults():
     from app.auth import hash_password
+    from db.workspaces import ensure_personal_workspace
 
     admin_email = (os.getenv("ADMIN_EMAIL") or "admin@local").strip().lower()
     admin_password = os.getenv("ADMIN_PASSWORD") or "admin123"
@@ -99,6 +156,7 @@ def seed_local_defaults():
             )
             db.add(admin)
             db.commit()
+            db.refresh(admin)
         else:
             if not admin.email:
                 admin.email = admin_email
@@ -106,36 +164,30 @@ def seed_local_defaults():
                 admin.username = admin_username
             db.commit()
 
-        if not db.query(Project).first():
-            project = Project(name="Shared workspace", created_by=admin.id)
-            db.add(project)
-            db.flush()
-            db.add(ProjectCanvas(project_id=project.id, nodes=[], edges=[], frames=[]))
-            db.commit()
-
-        _migrate_default_workspace(db, admin)
+        ensure_personal_workspace(db, admin, name="Admin workspace")
+        if not db.query(Project).filter(Project.created_by == admin.id).first():
+            workspace = (
+                db.query(Workspace)
+                .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+                .filter(WorkspaceMember.user_id == admin.id, WorkspaceMember.role == "owner")
+                .first()
+            )
+            if workspace:
+                project = Project(name="My canvas", created_by=admin.id, workspace_id=workspace.id)
+                db.add(project)
+                db.flush()
+                db.add(ProjectCanvas(project_id=project.id, nodes=[], edges=[], frames=[]))
+        db.commit()
+        _migrate_legacy_workspace_ids(db)
     finally:
         db.close()
 
 
-def _migrate_default_workspace(db, admin: User):
-    """Wrap any pre-workspace data into a default workspace so nothing existing
-    becomes orphaned/inaccessible after the multi-workspace upgrade."""
-    workspace = db.query(Workspace).first()
+def _migrate_legacy_workspace_ids(db):
+    """Backfill workspace_id on rows created before multi-workspace support."""
+    workspace = db.query(Workspace).order_by(Workspace.created_at.asc()).first()
     if not workspace:
-        workspace = Workspace(name="Shared workspace", owner_id=admin.id)
-        db.add(workspace)
-        db.flush()
-
-    existing_member_ids = {
-        m.user_id for m in db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == workspace.id)
-    }
-    for user in db.query(User).all():
-        if user.id in existing_member_ids:
-            continue
-        role = "owner" if user.id == workspace.owner_id else "member"
-        db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role=role))
-    db.commit()
+        return
 
     db.query(Project).filter(Project.workspace_id.is_(None)).update(
         {Project.workspace_id: workspace.id}, synchronize_session=False
