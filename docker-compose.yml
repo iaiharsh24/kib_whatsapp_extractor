@@ -4,6 +4,7 @@ services:
       context: ./local_platform
     environment:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
       WA_DATA_DB_PATH: /app/local_data/strategy.db
       DATABASE_URL: ${DATABASE_URL:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@local}

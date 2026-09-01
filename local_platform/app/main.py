@@ -52,7 +52,7 @@ from app.backups import (
     snapshot_before_destructive,
     start_backup_scheduler,
 )
-from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
+from app.rate_limit import client_key, login_limiter, signup_limiter
 from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
 from app.vectors import delete_upload_vectors
@@ -82,6 +82,20 @@ from db.models import (
 PROJECT_ROOT = os.path.dirname(_LOCAL_PLATFORM)
 UPLOAD_DIR = os.path.join(PROJECT_ROOT, "local_data", "uploads")
 
+
+def _cors_origins() -> list[str]:
+    """Lock CORS to the real frontend origin in production; allow localhost in dev."""
+    domain = (os.getenv("APP_DOMAIN") or "").strip()
+    if domain:
+        return [f"https://{domain}", f"http://{domain}"]
+    return [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ]
+
+
 app = FastAPI(
     title="Internal WhatsApp Strategy Canvas",
     description="Local monolith for a 5-6 person team.",
@@ -89,7 +103,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -551,7 +565,15 @@ async def health():
 
 
 @app.post("/api/auth/login")
-async def login(body: LoginBody, db: Session = Depends(get_db)):
+async def login(body: LoginBody, request: Request, db: Session = Depends(get_db)):
+    ip = client_key(request)
+    blocked, retry_after = login_limiter.is_blocked(ip)
+    if blocked:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed login attempts. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         identifier = (body.email or "").strip()
         user = (
@@ -560,7 +582,9 @@ async def login(body: LoginBody, db: Session = Depends(get_db)):
             .first()
         )
         if not user or not verify_password(body.password, user.password_hash):
+            login_limiter.record_failure(ip)
             raise HTTPException(status_code=401, detail="Invalid email or password")
+        login_limiter.reset(ip)
         ensure_personal_workspace(db, user)
         log_activity(db, user, "auth.login")
         db.commit()
@@ -591,9 +615,18 @@ async def preview_signup_code(code: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/auth/signup", status_code=201)
-async def signup(body: SignupBody, db: Session = Depends(get_db)):
+async def signup(body: SignupBody, request: Request, db: Session = Depends(get_db)):
+    ip = client_key(request)
+    blocked, retry_after = signup_limiter.is_blocked(ip)
+    if blocked:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many signup attempts. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
     signup_code = get_signup_code(db, body.code)
     if not signup_code_is_valid(signup_code):
+        signup_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="This signup code is invalid or has been used")
 
     email = (body.email or "").strip().lower()
@@ -603,6 +636,7 @@ async def signup(body: SignupBody, db: Session = Depends(get_db)):
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if db.query(User).filter(User.email == email).first():
+        signup_limiter.record_failure(ip)
         raise HTTPException(status_code=400, detail="An account with this email already exists. Sign in instead.")
 
     username = unique_username(db, body.username or email.split("@")[0])
@@ -644,6 +678,7 @@ async def signup(body: SignupBody, db: Session = Depends(get_db)):
     )
     db.commit()
     db.refresh(user)
+    signup_limiter.reset(ip)
     return {"token": make_token(user), "user": serialize_user(user)}
 
 

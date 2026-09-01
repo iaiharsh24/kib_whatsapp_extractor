@@ -181,21 +181,50 @@ def export_user_backup(db: Session, user_id: str, *, include_messages: bool = Fa
         .all()
     )
 
-    project_ids = {
-        item.id
-        for item in db.query(Project).filter(Project.created_by == user.id).all()
+    project_ids: set[str] = {
+        item.id for item in db.query(Project).filter(Project.created_by == user.id).all()
     }
-    for ws in workspaces:
-        for item in db.query(Project).filter(Project.workspace_id == ws.id).all():
+    ws_ids = [ws.id for ws in workspaces]
+    if ws_ids:
+        for item in db.query(Project).filter(Project.workspace_id.in_(ws_ids)).all():
             project_ids.add(item.id)
 
+    project_ids_list = sorted(project_ids)
+    projects_by_id = {
+        item.id: item
+        for item in db.query(Project).filter(Project.id.in_(project_ids_list)).all()
+    } if project_ids_list else {}
+
+    canvases_by_project: dict[str, list[ProjectCanvas]] = defaultdict(list)
+    for canvas in db.query(ProjectCanvas).filter(ProjectCanvas.project_id.in_(project_ids_list)).all():
+        canvases_by_project[canvas.project_id].append(canvas)
+
+    uploads_by_project: dict[str, list[Upload]] = defaultdict(list)
+    for upload in db.query(Upload).filter(Upload.project_id.in_(project_ids_list)).all():
+        uploads_by_project[upload.project_id].append(upload)
+
+    messages_by_project: dict[str, list[Message]] = defaultdict(list)
+    message_counts: dict[str, int] = {}
+    if include_messages and project_ids_list:
+        for msg in db.query(Message).filter(Message.project_id.in_(project_ids_list)).all():
+            messages_by_project[msg.project_id].append(msg)
+    elif project_ids_list:
+        message_counts = {
+            pid: int(cnt)
+            for pid, cnt in db.query(Message.project_id, func.count(Message.id))
+            .filter(Message.project_id.in_(project_ids_list))
+            .group_by(Message.project_id)
+            .all()
+            if pid
+        }
+
     projects_payload = []
-    for project_id in sorted(project_ids):
-        project = db.query(Project).filter(Project.id == project_id).first()
+    for project_id in project_ids_list:
+        project = projects_by_id.get(project_id)
         if not project:
             continue
-        canvases = db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).all()
-        uploads = db.query(Upload).filter(Upload.project_id == project_id).all()
+        canvases = canvases_by_project.get(project_id, [])
+        uploads = uploads_by_project.get(project_id, [])
         block: dict = {
             "project": {
                 "id": project.id,
@@ -219,7 +248,7 @@ def export_user_backup(db: Session, user_id: str, *, include_messages: bool = Fa
             "uploads": [_upload_row(item, uploaders) for item in uploads],
         }
         if include_messages:
-            messages = db.query(Message).filter(Message.project_id == project_id).all()
+            messages = messages_by_project.get(project_id, [])
             block["messages"] = [
                 {
                     "id": msg.id,
@@ -236,7 +265,7 @@ def export_user_backup(db: Session, user_id: str, *, include_messages: bool = Fa
                 for msg in messages
             ]
         else:
-            block["message_count"] = db.query(Message).filter(Message.project_id == project_id).count()
+            block["message_count"] = message_counts.get(project_id, 0)
         projects_payload.append(block)
 
     return {
@@ -309,8 +338,31 @@ def build_control_tables(db: Session, viewer: User, *, message_limit: int = 100,
     project_map = {item.id: item for item in projects}
 
     member_counts: dict[str, int] = defaultdict(int)
+    members_by_user: dict[str, int] = defaultdict(int)
     for member in members:
         member_counts[member.workspace_id] += 1
+        members_by_user[member.user_id] += 1
+
+    projects_by_creator: dict[str, int] = defaultdict(int)
+    projects_by_workspace: dict[str, int] = defaultdict(int)
+    for project in projects:
+        projects_by_creator[project.created_by] += 1
+        if project.workspace_id:
+            projects_by_workspace[project.workspace_id] += 1
+
+    uploads_by_user: dict[str, int] = defaultdict(int)
+    uploads_by_workspace: dict[str, int] = defaultdict(int)
+    uploads_by_project: dict[str, int] = defaultdict(int)
+    for upload in uploads:
+        uploads_by_user[upload.uploaded_by] += 1
+        if upload.workspace_id:
+            uploads_by_workspace[upload.workspace_id] += 1
+        if upload.project_id:
+            uploads_by_project[upload.project_id] += 1
+
+    canvases_by_project: dict[str, int] = defaultdict(int)
+    for canvas in canvases:
+        canvases_by_project[canvas.project_id] += 1
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -322,9 +374,9 @@ def build_control_tables(db: Session, viewer: User, *, message_limit: int = 100,
                 "role": user.role,
                 "is_super_admin": is_super_admin(user),
                 "created_at": user.created_at.isoformat() if user.created_at else None,
-                "workspace_count": sum(1 for m in members if m.user_id == user.id),
-                "projects_created": sum(1 for p in projects if p.created_by == user.id),
-                "uploads_count": sum(1 for u in uploads if u.uploaded_by == user.id),
+                "workspace_count": members_by_user.get(user.id, 0),
+                "projects_created": projects_by_creator.get(user.id, 0),
+                "uploads_count": uploads_by_user.get(user.id, 0),
             }
             for user in users
         ],
@@ -336,8 +388,8 @@ def build_control_tables(db: Session, viewer: User, *, message_limit: int = 100,
                 "owner_username": username_map.get(ws.owner_id),
                 "owner_email": email_map.get(ws.owner_id),
                 "member_count": member_counts.get(ws.id, 0),
-                "project_count": sum(1 for p in projects if p.workspace_id == ws.id),
-                "upload_count": sum(1 for u in uploads if u.workspace_id == ws.id),
+                "project_count": projects_by_workspace.get(ws.id, 0),
+                "upload_count": uploads_by_workspace.get(ws.id, 0),
                 "created_at": ws.created_at.isoformat() if ws.created_at else None,
             }
             for ws in workspaces
@@ -364,8 +416,8 @@ def build_control_tables(db: Session, viewer: User, *, message_limit: int = 100,
                 "created_by": project.created_by,
                 "created_by_username": username_map.get(project.created_by),
                 "created_at": project.created_at.isoformat() if project.created_at else None,
-                "canvas_count": sum(1 for c in canvases if c.project_id == project.id),
-                "upload_count": sum(1 for u in uploads if u.project_id == project.id),
+                "canvas_count": canvases_by_project.get(project.id, 0),
+                "upload_count": uploads_by_project.get(project.id, 0),
             }
             for project in projects
         ],
