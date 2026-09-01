@@ -28,12 +28,7 @@ OMITTED = re.compile(
     r"<audio omitted>|<document omitted>|<sticker omitted>",
     re.IGNORECASE,
 )
-SYSTEM_SKIP = re.compile(
-    r"Messages and calls are end-to-end encrypted|"
-    r"You created this group|Your security code|"
-    r"This chat is with a business account",
-    re.IGNORECASE,
-)
+FALLBACK_TS = datetime(1970, 1, 1, 0, 0, 0)
 DOC_EXT = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".csv", ".rtf", ".txt", ".zip"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp"}
 VIDEO_EXT = {".mp4", ".mov", ".webm", ".3gp", ".mkv"}
@@ -115,9 +110,7 @@ def _split_sender(rest: str) -> tuple[str | None, str]:
     return None, rest.strip()
 
 
-def _finalize(current: dict) -> dict | None:
-    if current["is_system"] and SYSTEM_SKIP.search(current["raw_text"] or ""):
-        return None
+def _finalize(current: dict) -> dict:
     msg_type, url, filename = classify_message(
         current["raw_text"],
         current.get("extracted_filename"),
@@ -129,41 +122,60 @@ def _finalize(current: dict) -> dict | None:
     return current
 
 
+def _start_message(
+    chat_name: str,
+    when: datetime,
+    rest: str,
+    preamble: str = "",
+) -> dict:
+    sender, content = _split_sender(rest)
+    attached = ATTACHED.search(content)
+    filename = attached.group("file").strip() if attached else None
+    content_clean = ATTACHED.sub("", content).strip()
+    if not filename:
+        attached_match = ATTACHED_FILE_LINE.search(content_clean)
+        if attached_match:
+            filename = attached_match.group("file").strip()
+            cleaned = ATTACHED_FILE_LINE.sub("", content_clean).strip()
+            content_clean = cleaned or content_clean
+    raw_text = content_clean
+    if preamble:
+        raw_text = f"{preamble}\n{content_clean}".strip() if content_clean else preamble.strip()
+    return {
+        "chat_name": chat_name,
+        "timestamp": when,
+        "sender": sender or "<system>",
+        "raw_text": raw_text,
+        "extracted_filename": filename,
+        "urls": normalize_urls(raw_text),
+        "is_system": sender is None,
+    }
+
+
 def iter_messages(path: Path, chat_name: str | None = None) -> Iterator[dict]:
     chat_name = chat_name or chat_name_from_path(path)
     current: dict | None = None
+    preamble: list[str] = []
+    fallback_counter = 0
     with path.open(encoding="utf-8", errors="replace") as handle:
         for raw in handle:
             line = raw.rstrip("\n").lstrip("\u200e\u200f\ufeff")
             match = HEADER_IOS.match(line) or HEADER_ANDROID.match(line)
             if match:
                 if current:
-                    done = _finalize(current)
-                    if done:
-                        yield done
+                    yield _finalize(current)
                 when = parse_datetime(match.group("date"), match.group("time"))
+                rest = match.group("rest")
                 if when is None:
-                    current = None
+                    if current is not None:
+                        current["raw_text"] = (current["raw_text"] + "\n" + line).strip()
+                        current["urls"].extend(u for u in normalize_urls(line) if u not in current["urls"])
+                        continue
+                    preamble.append(line)
                     continue
-                sender, content = _split_sender(match.group("rest"))
-                attached = ATTACHED.search(content)
-                filename = attached.group("file").strip() if attached else None
-                content_clean = ATTACHED.sub("", content).strip()
-                if not filename:
-                    attached_match = ATTACHED_FILE_LINE.search(content_clean)
-                    if attached_match:
-                        filename = attached_match.group("file").strip()
-                        cleaned = ATTACHED_FILE_LINE.sub("", content_clean).strip()
-                        content_clean = cleaned or content_clean
-                current = {
-                    "chat_name": chat_name,
-                    "timestamp": when,
-                    "sender": sender or "<system>",
-                    "raw_text": content_clean,
-                    "extracted_filename": filename,
-                    "urls": normalize_urls(content_clean),
-                    "is_system": sender is None,
-                }
+                lead = "\n".join(preamble).strip()
+                preamble = []
+                current = _start_message(chat_name, when, rest, lead)
             elif current is not None:
                 stripped = line.strip()
                 attached_match = ATTACHED_FILE_LINE.match(stripped)
@@ -177,7 +189,15 @@ def iter_messages(path: Path, chat_name: str | None = None) -> Iterator[dict]:
                 else:
                     current["raw_text"] = (current["raw_text"] + "\n" + line).strip()
                     current["urls"].extend(u for u in normalize_urls(line) if u not in current["urls"])
+            elif line.strip():
+                preamble.append(line)
+    if preamble and current is None:
+        fallback_counter += 1
+        current = _start_message(
+            chat_name,
+            FALLBACK_TS.replace(second=min(fallback_counter, 59)),
+            preamble[0],
+            "\n".join(preamble[1:]),
+        )
     if current:
-        done = _finalize(current)
-        if done:
-            yield done
+        yield _finalize(current)

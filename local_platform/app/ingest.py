@@ -70,8 +70,8 @@ def _attach_local_file(parsed: dict, upload_id: str, media_index: dict[str, Path
     return parsed
 
 
-def _existing_hashes(db, project_id: str | None, hashes: list[str]) -> set[str]:
-    if not project_id or not hashes:
+def _existing_hashes(db, upload_id: str, hashes: list[str]) -> set[str]:
+    if not upload_id or not hashes:
         return set()
     found: set[str] = set()
     for index in range(0, len(hashes), 400):
@@ -79,7 +79,7 @@ def _existing_hashes(db, project_id: str | None, hashes: list[str]) -> set[str]:
         found.update(
             item[0]
             for item in db.query(Message.content_hash)
-            .filter(Message.project_id == project_id, Message.content_hash.in_(chunk))
+            .filter(Message.upload_id == upload_id, Message.content_hash.in_(chunk))
             .all()
         )
     return found
@@ -89,18 +89,18 @@ def _insert_messages_ignore(db, rows: list[dict]) -> None:
     if not rows:
         return
     if engine.dialect.name == "postgresql":
-        stmt = pg_insert(Message).on_conflict_do_nothing(constraint="uq_message_project_hash")
+        stmt = pg_insert(Message).on_conflict_do_nothing(constraint="uq_message_upload_hash")
     else:
-        stmt = sqlite_insert(Message).on_conflict_do_nothing(index_elements=["project_id", "content_hash"])
+        stmt = sqlite_insert(Message).on_conflict_do_nothing(index_elements=["upload_id", "content_hash"])
     db.execute(stmt, rows)
 
 
 def _flush(db, batch: list[dict]) -> tuple[int, int]:
-    """Insert new rows, skipping duplicates by project + content hash."""
+    """Insert new rows, skipping only exact duplicates within the same upload."""
     total = len(batch)
     unique: dict[str, dict] = {}
     for row in batch:
-        if not row.get("project_id"):
+        if not row.get("upload_id"):
             continue
         unique[row["content_hash"]] = row
     rows = []
@@ -110,8 +110,8 @@ def _flush(db, batch: list[dict]) -> tuple[int, int]:
         rows.append(payload)
     if not rows:
         return 0, total
-    project_id = rows[0]["project_id"]
-    existing = _existing_hashes(db, project_id, [row["content_hash"] for row in rows])
+    upload_id = rows[0]["upload_id"]
+    existing = _existing_hashes(db, upload_id, [row["content_hash"] for row in rows])
     new_rows = [row for row in rows if row["content_hash"] not in existing]
     if not new_rows:
         return 0, total
@@ -122,7 +122,7 @@ def _flush(db, batch: list[dict]) -> tuple[int, int]:
     for index in range(0, len(hashes), 400):
         inserted.extend(
             db.query(Message)
-            .filter(Message.project_id == project_id, Message.content_hash.in_(hashes[index : index + 400]))
+            .filter(Message.upload_id == upload_id, Message.content_hash.in_(hashes[index : index + 400]))
             .all()
         )
     upsert_messages(inserted)

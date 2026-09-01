@@ -12,7 +12,7 @@ EXTRACT_DIR = Path(ROOT) / "local_data" / "extracted"
 UPLOAD_DIR = Path(ROOT) / "local_data" / "uploads"
 SKIP_DIRS = {"node_modules", ".git", "__macosx", ".venv", "dist", "build"}
 CHAT_BASENAMES = {"_chat.txt", "chat.txt"}
-MAX_MEMBER_BYTES = 500 * 1024 * 1024
+MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 
 

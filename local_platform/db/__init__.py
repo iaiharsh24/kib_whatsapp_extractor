@@ -119,7 +119,7 @@ def _ensure_columns():
                 conn.execute(text("ALTER TABLE projects ADD COLUMN workspace_id VARCHAR"))
 
     _migrate_project_canvas_multi()
-    _ensure_message_hash_index()
+    _migrate_message_upload_dedupe()
     _migrate_project_data()
 
 
@@ -230,40 +230,51 @@ def _migrate_project_data():
         db.close()
 
 
-def _ensure_message_hash_index():
-    """Ensure per-project dedupe index on (project_id, content_hash)."""
+def _migrate_message_upload_dedupe():
+    """Dedupe messages per upload (not per project) so every export file is fully ingested."""
     inspector = inspect(engine)
     if "messages" not in inspector.get_table_names():
         return
 
     indexes = {item["name"]: item for item in inspector.get_indexes("messages")}
     uniques = {item["name"]: item for item in inspector.get_unique_constraints("messages")}
-    has_project_hash = any(
-        set(item.get("column_names") or []) == {"project_id", "content_hash"}
-        for item in (*indexes.values(), *uniques.values())
-    )
-    if has_project_hash:
+    all_meta = (*indexes.values(), *uniques.values())
+
+    has_upload_hash = any(set(item.get("column_names") or []) == {"upload_id", "content_hash"} for item in all_meta)
+    has_project_hash = any(set(item.get("column_names") or []) == {"project_id", "content_hash"} for item in all_meta)
+
+    if has_upload_hash and not has_project_hash:
         return
 
+    print("[db] Migrating messages: dedupe by upload_id + content_hash (import all messages per export)")
     with engine.begin() as conn:
         if DB_BACKEND == "sqlite":
+            conn.execute(text("DROP INDEX IF EXISTS uq_message_project_hash"))
+            conn.execute(text("DROP INDEX IF EXISTS uq_message_workspace_hash"))
+            conn.execute(text("DROP INDEX IF EXISTS uq_message_upload_hash"))
             for name, meta in indexes.items():
                 cols = set(meta.get("column_names") or [])
-                if meta.get("unique") and cols in ({"content_hash"}, {"workspace_id", "content_hash"}):
+                if meta.get("unique") and cols in (
+                    {"project_id", "content_hash"},
+                    {"workspace_id", "content_hash"},
+                    {"content_hash"},
+                ):
                     conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
             conn.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_project_hash "
-                    "ON messages (project_id, content_hash)"
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_upload_hash "
+                    "ON messages (upload_id, content_hash)"
                 )
             )
         else:
+            conn.execute(text("ALTER TABLE messages DROP CONSTRAINT IF EXISTS uq_message_project_hash"))
             conn.execute(text("ALTER TABLE messages DROP CONSTRAINT IF EXISTS uq_message_workspace_hash"))
+            conn.execute(text("DROP INDEX IF EXISTS uq_message_project_hash"))
             conn.execute(text("DROP INDEX IF EXISTS uq_message_workspace_hash"))
             conn.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_project_hash "
-                    "ON messages (project_id, content_hash)"
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_upload_hash "
+                    "ON messages (upload_id, content_hash)"
                 )
             )
 

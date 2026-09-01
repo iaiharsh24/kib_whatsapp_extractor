@@ -153,7 +153,7 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_sender_timestamp", "sender", "timestamp"),
         Index("ix_messages_type_timestamp", "type", "timestamp"),
-        UniqueConstraint("project_id", "content_hash", name="uq_message_project_hash"),
+        UniqueConstraint("upload_id", "content_hash", name="uq_message_upload_hash"),
     )
 
 
