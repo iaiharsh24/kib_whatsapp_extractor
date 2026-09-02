@@ -19,7 +19,7 @@ export function defaultItemSize(messageType?: string | null) {
   const type = (messageType || "").toLowerCase();
   if (type === "reel") return { width: 208, height: 400 };
   if (type === "image" || type === "media_omitted") return { width: 224, height: 300 };
-  if (type === "document") return { width: 256, height: 180 };
+  if (type === "document") return { width: 280, height: 240 };
   return { width: 256, height: 200 };
 }
 

@@ -17,6 +17,7 @@ export function hydrateNodesFromItems(nodes: unknown[], items: MessageRecord[]):
     }
     const preview: LinkPreview = message.link_preview || { url: message.extracted_url || "" };
     data.url = message.extracted_url;
+    data.filename = message.extracted_filename || data.filename || null;
     data.previewImage = preview.image ?? null;
     data.previewTitle = preview.title ?? null;
     data.embed = preview.embed ?? null;

@@ -482,6 +482,7 @@ export default function StrategyBoard({
         sender: message.sender,
         text: message.raw_text,
         url: message.extracted_url,
+        filename: message.extracted_filename || null,
         previewImage: message.link_preview?.image || null,
         previewTitle: message.link_preview?.title || null,
         embed: message.link_preview?.embed || null,

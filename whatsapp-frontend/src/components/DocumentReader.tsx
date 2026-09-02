@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { fileSrc, formatWhen, getToken } from "@/lib/api";
 import type { MessageRecord } from "@/lib/types";
 
@@ -280,6 +281,11 @@ export default function DocumentReader({
   const [html, setHtml] = useState<string>("");
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") onClose();
@@ -345,7 +351,9 @@ export default function DocumentReader({
     };
   }, [href, kind]);
 
-  return (
+  if (!mounted) return null;
+
+  return createPortal(
     <ReaderChrome title={title} subtitle={subtitle} kind={kind} href={href} onClose={onClose}>
       {loading ? (
         <div className="flex h-full min-h-[320px] items-center justify-center text-sm text-zinc-500">Loading…</div>
@@ -468,6 +476,7 @@ export default function DocumentReader({
           text-align: left;
         }
       `}</style>
-    </ReaderChrome>
+    </ReaderChrome>,
+    document.body,
   );
 }

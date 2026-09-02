@@ -1,10 +1,12 @@
 "use client";
 
-import { memo, type CSSProperties, type ReactNode } from "react";
+import { memo, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import { fileSrc, formatWhen } from "@/lib/api";
 import { InstagramReelEmbed, captionText, isInstagramEmbed } from "@/components/MediaPreview";
+import DocumentReader, { extensionOf, readerKindFor } from "@/components/DocumentReader";
 import TagEditor from "@/components/TagEditor";
+import type { MessageRecord } from "@/lib/types";
 import { useCanvasEdit } from "./CanvasContext";
 import { visibleTags } from "@/lib/tags";
 
@@ -61,12 +63,14 @@ function NodeShell({
 
 export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps) {
   const { setNodeTags, knownTags } = useCanvasEdit();
+  const [readerOpen, setReaderOpen] = useState(false);
   const item = data as {
     messageId?: string;
     type?: string;
     sender?: string;
     text?: string;
     url?: string;
+    filename?: string | null;
     previewImage?: string | null;
     previewTitle?: string | null;
     embed?: string | null;
@@ -78,6 +82,31 @@ export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps
   const isReel = item.type === "reel";
   const isImage = item.type === "image" || item.type === "media_omitted";
   const isDoc = item.type === "document";
+  const filename =
+    item.filename ||
+    (item.url ? decodeURIComponent((item.url.split("?")[0].split("/").pop() || "").trim()) : "") ||
+    null;
+  const readerItem = useMemo<MessageRecord | null>(() => {
+    if (!isDoc) return null;
+    return {
+      id: item.messageId || id,
+      upload_id: "",
+      sender: item.sender || "Unknown",
+      timestamp: item.timestamp || null,
+      raw_text: item.text || "",
+      type: "document",
+      extracted_url: item.url || null,
+      extracted_filename: filename,
+      context_before: null,
+      context_after: null,
+      chat_name: null,
+      tags: item.tags || [],
+      link_preview: null,
+      urls: [],
+    };
+  }, [filename, id, isDoc, item.messageId, item.sender, item.tags, item.text, item.timestamp, item.url]);
+  const docKind = readerItem ? readerKindFor(readerItem) : "unsupported";
+  const docExt = extensionOf(filename || item.url || "").toUpperCase() || "DOC";
   const localImage = local && isImage ? local : null;
   const remoteImage =
     item.previewImage && !item.previewImage.includes("google.com/s2/favicons") ? item.previewImage : null;
@@ -89,7 +118,7 @@ export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps
   const caption = captionText({
     raw_text: item.text || "",
     extracted_url: item.url || null,
-    extracted_filename: null,
+    extracted_filename: filename,
     urls: [],
   });
   const hasMedia = !!(videoSrc || (isReel && instagramSrc) || (isReel && item.embed) || imageSrc || isReel);
@@ -124,12 +153,25 @@ export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps
           <div className="relative min-h-0 w-full flex-1 bg-black">
             <img src={imageSrc} alt="" className="absolute inset-0 h-full w-full object-contain" />
           </div>
+        ) : isDoc && local ? (
+          <button
+            type="button"
+            className="nodrag nowheel nopan relative flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-2 bg-amber-50 px-3 text-center hover:bg-amber-100"
+            onClick={() => setReaderOpen(true)}
+            title="Open in reader"
+          >
+            <span className="rounded-md bg-amber-200/80 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-900">
+              {docExt}
+            </span>
+            <span className="line-clamp-2 text-xs font-medium text-amber-950">{filename || "Document"}</span>
+            <span className="text-[10px] font-semibold text-emerald-700">Open in reader →</span>
+          </button>
         ) : isReel ? (
           <div className="flex min-h-0 w-full flex-1 items-center justify-center bg-gradient-to-br from-purple-600 via-pink-500 to-orange-400 px-3 text-center text-sm font-semibold text-white">
             {item.previewTitle || "Reel"}
           </div>
         ) : null}
-        <div className={`min-h-0 overflow-auto p-3 ${hasMedia ? "flex-none" : "flex-1"}`}>
+        <div className={`min-h-0 overflow-auto p-3 ${hasMedia || (isDoc && local) ? "flex-none" : "flex-1"}`}>
           <p className="text-[10px] uppercase tracking-wide text-emerald-700">{item.type}</p>
           <p className="text-sm font-semibold">{item.sender}</p>
           <p className="text-[10px] text-zinc-500">{formatWhen(item.timestamp)}</p>
@@ -137,8 +179,15 @@ export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps
             <p className="mt-1 line-clamp-2 text-xs font-medium text-zinc-700">{item.previewTitle}</p>
           ) : null}
           {caption ? <p className="mt-1 line-clamp-3 text-xs text-zinc-600">{caption}</p> : null}
-          {isDoc && item.url ? (
-            <p className="mt-1 truncate text-[11px] text-zinc-500">{item.url.split("/").pop()}</p>
+          {isDoc && filename ? <p className="mt-1 truncate text-[11px] text-zinc-500">{filename}</p> : null}
+          {isDoc && local ? (
+            <button
+              type="button"
+              className="nodrag nowheel nopan mt-1 text-[11px] font-medium text-emerald-700 hover:underline"
+              onClick={() => setReaderOpen(true)}
+            >
+              Open in reader ({docKind})
+            </button>
           ) : null}
           {item.url && item.url.startsWith("http") ? (
             <p className="mt-1 truncate text-[11px] text-emerald-700">{item.url}</p>
@@ -154,6 +203,7 @@ export const ItemNode = memo(function ItemNode({ id, data, selected }: NodeProps
           </div>
         </div>
       </NodeShell>
+      {readerOpen && readerItem ? <DocumentReader item={readerItem} onClose={() => setReaderOpen(false)} /> : null}
     </>
   );
 });
