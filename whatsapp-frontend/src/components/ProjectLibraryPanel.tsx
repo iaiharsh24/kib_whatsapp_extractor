@@ -9,6 +9,7 @@ import LibraryFilters, {
   libraryQuery,
 } from "@/components/LibraryFilters";
 import { MediaFrame, ItemMeta } from "@/components/MediaPreview";
+import DocumentReader from "@/components/DocumentReader";
 import { TAGS_EVENT, uniqueTags } from "@/lib/tags";
 import type {
   LibraryFilterOptions,
@@ -60,10 +61,12 @@ function MediaList({
   items,
   libTab,
   knownTags,
+  onOpenDocument,
 }: {
   items: MessageRecord[];
   libTab: LibTab;
   knownTags: string[];
+  onOpenDocument?: (item: MessageRecord) => void;
 }) {
   if (items.length === 0) {
     return (
@@ -114,6 +117,9 @@ function MediaList({
             onDragStart={(event) => {
               event.dataTransfer.setData("application/json", JSON.stringify(item));
             }}
+            onDoubleClick={() => {
+              if (item.type === "document" && local) onOpenDocument?.(item);
+            }}
             className="mb-2 flex cursor-grab gap-2 overflow-hidden rounded-lg border border-zinc-200 p-2 hover:border-emerald-500"
           >
             {local && isVideo ? (
@@ -133,14 +139,16 @@ function MediaList({
               <p className="text-[10px] uppercase text-emerald-700">{item.type}</p>
               <ItemMeta item={item} editable knownTags={knownTags} />
               {local && item.type === "document" ? (
-                <a
-                  href={local}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenDocument?.(item);
+                  }}
                   className="mt-0.5 inline-block text-[10px] font-medium text-emerald-700 hover:underline"
                 >
-                  Open file
-                </a>
+                  Open in reader
+                </button>
               ) : null}
             </div>
           </div>
@@ -179,6 +187,7 @@ export default function ProjectLibraryPanel({
     chats: [],
     sites: [],
   });
+  const [readerItem, setReaderItem] = useState<MessageRecord | null>(null);
 
   const selectedSummary = summaries.find((row) => row.upload.id === selectedUploadId) ?? null;
 
@@ -448,8 +457,14 @@ export default function ProjectLibraryPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto p-2">
-        <MediaList items={library} libTab={libTab} knownTags={filterOptions.tags} />
+        <MediaList
+          items={library}
+          libTab={libTab}
+          knownTags={filterOptions.tags}
+          onOpenDocument={setReaderItem}
+        />
       </div>
+      {readerItem ? <DocumentReader item={readerItem} onClose={() => setReaderItem(null)} /> : null}
     </aside>
   );
 }

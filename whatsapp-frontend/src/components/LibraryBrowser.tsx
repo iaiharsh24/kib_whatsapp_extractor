@@ -9,6 +9,7 @@ import LibraryFilters, {
   libraryQuery,
 } from "@/components/LibraryFilters";
 import { ItemMeta, MediaFrame, isImageMessage, isVideoMessage } from "@/components/MediaPreview";
+import DocumentReader from "@/components/DocumentReader";
 import { TAGS_EVENT, uniqueTags } from "@/lib/tags";
 import { getActiveWorkspaceId, workspaceQuery } from "@/lib/workspace";
 import type {
@@ -65,11 +66,13 @@ export function LibraryMediaGrid({
   tab,
   knownTags,
   draggable = false,
+  onOpenDocument,
 }: {
   items: MessageRecord[];
   tab: LibraryTab;
   knownTags: string[];
   draggable?: boolean;
+  onOpenDocument?: (item: MessageRecord) => void;
 }) {
   if (items.length === 0) {
     return (
@@ -138,9 +141,14 @@ export function LibraryMediaGrid({
                 <img src={local} alt="" className="h-full w-full object-contain" />
               </div>
             ) : isDoc ? (
-              <div className="flex h-20 w-16 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-[10px] font-semibold uppercase text-amber-800">
+              <button
+                type="button"
+                onClick={() => onOpenDocument?.(item)}
+                className="flex h-20 w-16 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-[10px] font-semibold uppercase text-amber-800 hover:bg-amber-100"
+                title="Open in reader"
+              >
                 Doc
-              </div>
+              </button>
             ) : (
               <div className="flex h-20 w-16 shrink-0 items-center justify-center rounded-lg bg-zinc-50 text-[10px] font-semibold uppercase text-zinc-500">
                 {item.type}
@@ -150,14 +158,16 @@ export function LibraryMediaGrid({
               <p className="text-[10px] uppercase tracking-wide text-emerald-700">{item.type}</p>
               <ItemMeta item={item} editable knownTags={knownTags} />
               {local && isDoc ? (
-                <a
-                  href={local}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenDocument?.(item);
+                  }}
                   className="mt-1 inline-block text-[11px] font-medium text-emerald-700 hover:underline"
                 >
-                  Open file
-                </a>
+                  Open in reader
+                </button>
               ) : null}
               {item.extracted_url?.startsWith("http") ? (
                 <a
@@ -213,6 +223,7 @@ export default function LibraryBrowser({
     sites: [],
   });
   const [localUploading, setLocalUploading] = useState(false);
+  const [readerItem, setReaderItem] = useState<MessageRecord | null>(null);
 
   const selectedSummary = summaries.find((row) => row.upload.id === selectedUploadId) ?? null;
   const zipCount = summaries.length;
@@ -586,7 +597,13 @@ export default function LibraryBrowser({
           />
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-4">
-          <LibraryMediaGrid items={library} tab={libTab} knownTags={filterOptions.tags} draggable={draggable} />
+          <LibraryMediaGrid
+            items={library}
+            tab={libTab}
+            knownTags={filterOptions.tags}
+            draggable={draggable}
+            onOpenDocument={setReaderItem}
+          />
           {library.length < libraryTotal ? (
             <div className="mt-4 flex justify-center">
               <button
@@ -601,6 +618,7 @@ export default function LibraryBrowser({
           ) : null}
         </div>
       </section>
+      {readerItem ? <DocumentReader item={readerItem} onClose={() => setReaderItem(null)} /> : null}
     </div>
   );
 }
