@@ -79,17 +79,25 @@ export default function ControlDataTables() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    try {
-      const data = await api<ControlTables>(
-        `/api/admin/control/tables?message_limit=${messageLimit}&message_offset=${messageOffset}`,
-      );
-      setTables(data);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load tables");
-    } finally {
-      setLoading(false);
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const data = await api<ControlTables>(
+          `/api/admin/control/tables?message_limit=${messageLimit}&message_offset=${messageOffset}`,
+        );
+        setTables(data);
+        setError(null);
+        setLoading(false);
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error("Failed to load tables");
+        if (attempt < 2) {
+          await new Promise((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
+        }
+      }
     }
+    setError(lastError?.message || "Failed to load tables");
+    setLoading(false);
   }, [messageLimit, messageOffset]);
 
   useEffect(() => {

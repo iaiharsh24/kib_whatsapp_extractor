@@ -212,19 +212,56 @@ export default function ControlPage() {
   const [expandedUsers, setExpandedUsers] = useState<Set<string>>(new Set());
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [mainTab, setMainTab] = useState<"overview" | "tables" | "backups">("tables");
+  const [loadWarning, setLoadWarning] = useState<string | null>(null);
+
+  async function fetchWithRetry<T>(path: string, attempts = 3): Promise<T> {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await api<T>(path);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error("Request failed");
+        if (attempt < attempts - 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError ?? new Error("Request failed");
+  }
 
   async function load() {
-    const [nextControl, nextDb, nextSnapshots, nextBackups] = await Promise.all([
-      api<ControlOverview>("/api/admin/control/overview"),
-      api<DbOverview>("/api/admin/db/overview"),
-      api<DbSnapshotResponse>("/api/admin/db/snapshots?limit=100"),
-      api<BackupStatus>("/api/admin/db/backup-status"),
+    setLoadWarning(null);
+    const results = await Promise.allSettled([
+      fetchWithRetry<ControlOverview>("/api/admin/control/overview"),
+      fetchWithRetry<DbOverview>("/api/admin/db/overview"),
+      fetchWithRetry<DbSnapshotResponse>("/api/admin/db/snapshots?limit=100"),
+      fetchWithRetry<BackupStatus>("/api/admin/db/backup-status"),
     ]);
-    setControl(nextControl);
-    setDbOverview(nextDb);
-    setSnapshots(nextSnapshots.items);
-    setSnapshotTotal(nextSnapshots.total);
-    setBackups(nextBackups);
+    const labels = ["overview", "database summary", "snapshots", "backup status"];
+    const failures: string[] = [];
+    const [overviewRes, dbRes, snapshotsRes, backupsRes] = results;
+
+    if (overviewRes.status === "fulfilled") setControl(overviewRes.value);
+    else failures.push(labels[0]);
+
+    if (dbRes.status === "fulfilled") setDbOverview(dbRes.value);
+    else failures.push(labels[1]);
+
+    if (snapshotsRes.status === "fulfilled") {
+      setSnapshots(snapshotsRes.value.items);
+      setSnapshotTotal(snapshotsRes.value.total);
+    } else failures.push(labels[2]);
+
+    if (backupsRes.status === "fulfilled") setBackups(backupsRes.value);
+    else failures.push(labels[3]);
+
+    if (failures.length === results.length) {
+      const first = results.find((item) => item.status === "rejected") as PromiseRejectedResult | undefined;
+      throw first?.reason instanceof Error ? first.reason : new Error("Failed to load control center");
+    }
+    if (failures.length) {
+      setLoadWarning(`Some sections could not load (${failures.join(", ")}). Data is still in the database — try Refresh.`);
+    }
   }
 
   useEffect(() => {
@@ -281,8 +318,24 @@ export default function ControlPage() {
     }
   }
 
-  if (error) return <div className="p-6 text-sm text-red-600">{error}</div>;
-  if (!control || !dbOverview) return <div className="p-6 text-sm text-zinc-500">Loading control center…</div>;
+  if (error) {
+    return (
+      <div className="p-6">
+        <p className="text-sm text-red-600">{error}</p>
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            void load().catch((err) => setError(err instanceof Error ? err.message : "Failed to load control center"));
+          }}
+          className="mt-3 rounded-md bg-zinc-900 px-4 py-2 text-sm text-white"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (!control && !dbOverview) return <div className="p-6 text-sm text-zinc-500">Loading control center…</div>;
 
   return (
     <div className="h-full overflow-auto p-8">
@@ -306,6 +359,13 @@ export default function ControlPage() {
 
       {backups ? <BackupBanner status={backups} /> : null}
 
+      {loadWarning ? (
+        <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          {loadWarning}
+        </div>
+      ) : null}
+
+      {control ? (
       <section className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">Platform totals</h3>
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -317,6 +377,7 @@ export default function ControlPage() {
           ))}
         </div>
       </section>
+      ) : null}
 
       <div className="mt-4 flex flex-wrap gap-2 border-b border-zinc-200 pb-3">
         {(
@@ -352,6 +413,7 @@ export default function ControlPage() {
       ) : null}
 
       {mainTab === "overview" ? (
+        control && dbOverview ? (
         <>
       <section className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">All users ({control.users.length})</h3>
@@ -425,9 +487,13 @@ export default function ControlPage() {
         </div>
       </section>
         </>
+        ) : (
+          <p className="mt-6 text-sm text-zinc-500">Overview data is still loading or temporarily unavailable. Try Refresh.</p>
+        )
       ) : null}
 
       {mainTab === "backups" ? (
+      dbOverview ? (
       <section className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
         <h3 className="font-semibold">Database snapshots ({dbOverview.backend})</h3>
         <p className="mt-1 text-sm text-zinc-600">
@@ -477,6 +543,9 @@ export default function ControlPage() {
           </table>
         )}
       </section>
+      ) : (
+        <p className="mt-6 text-sm text-zinc-500">Backup metadata is temporarily unavailable. Try Refresh.</p>
+      )
       ) : null}
     </div>
   );

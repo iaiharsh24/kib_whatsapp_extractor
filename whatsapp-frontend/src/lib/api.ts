@@ -24,6 +24,17 @@ export function setSession(token: string, user: UserRecord) {
   localStorage.setItem(USER_KEY, JSON.stringify(user));
 }
 
+export async function refreshSessionUser(): Promise<UserRecord | null> {
+  if (!getToken()) return null;
+  try {
+    const user = await api<UserRecord>("/api/auth/me");
+    localStorage.setItem(USER_KEY, JSON.stringify(user));
+    return user;
+  } catch {
+    return getUser();
+  }
+}
+
 export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
@@ -45,6 +56,9 @@ function parseApiError(body: string, status: number): string {
   }
   if (trimmed === "Internal Server Error") {
     return "The server hit an unexpected error. Refresh the page and try again.";
+  }
+  if (status >= 502 && status <= 504) {
+    return "The server is temporarily unavailable (often right after a deploy). Wait a few seconds and refresh.";
   }
   return trimmed;
 }

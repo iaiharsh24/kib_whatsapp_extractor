@@ -721,7 +721,7 @@ async def put_preference(
 
 
 @app.get("/api/workspaces")
-async def list_workspaces(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_workspaces(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     if is_super_admin(user):
         workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
         ws_ids = [workspace.id for workspace in workspaces]
@@ -2270,13 +2270,13 @@ async def list_activity_logs(
 
 
 @app.get("/api/admin/control/overview")
-async def control_overview(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+def control_overview(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     """User-centric view of every account, project, canvas, and upload."""
     return build_control_overview(db, admin)
 
 
 @app.get("/api/admin/control/tables")
-async def control_tables(
+def control_tables(
     message_limit: int = Query(100, ge=1, le=500),
     message_offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -2334,12 +2334,24 @@ def _serialize_upload_for_db(upload: Upload, uploader_name: str | None) -> dict:
 
 
 @app.get("/api/admin/db/overview")
-async def db_overview(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+def db_overview(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     """All zip uploads organized by workspace -> project, plus global counts."""
     workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
     projects = db.query(Project).order_by(Project.created_at.desc()).all()
     uploads = db.query(Upload).order_by(Upload.uploaded_at.desc()).all()
     users = {item.id: item.username for item in db.query(User).all()}
+
+    message_counts = dict(
+        db.query(Message.project_id, func.count(Message.id))
+        .filter(Message.project_id.isnot(None))
+        .group_by(Message.project_id)
+        .all()
+    )
+    canvas_counts = dict(
+        db.query(ProjectCanvas.project_id, func.count(ProjectCanvas.id))
+        .group_by(ProjectCanvas.project_id)
+        .all()
+    )
 
     uploads_by_project: dict[str, list] = {}
     for upload in uploads:
@@ -2355,8 +2367,8 @@ async def db_overview(db: Session = Depends(get_db), admin: User = Depends(requi
             "name": project.name,
             "created_at": project.created_at.isoformat() if project.created_at else None,
             "uploads": uploads_by_project.get(project.id, []),
-            "message_count": db.query(Message).filter(Message.project_id == project.id).count(),
-            "canvas_count": db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project.id).count(),
+            "message_count": int(message_counts.get(project.id, 0)),
+            "canvas_count": int(canvas_counts.get(project.id, 0)),
         })
 
     workspace_rows = []
@@ -2391,7 +2403,7 @@ async def db_overview(db: Session = Depends(get_db), admin: User = Depends(requi
 
 
 @app.get("/api/admin/db/snapshots")
-async def list_db_snapshots(
+def list_db_snapshots(
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     admin: User = Depends(require_super_admin),
@@ -2429,7 +2441,7 @@ async def create_db_snapshot(
 
 
 @app.get("/api/admin/db/backup-status")
-async def get_backup_status(admin: User = Depends(require_super_admin)):
+def get_backup_status(admin: User = Depends(require_super_admin)):
     return backup_status()
 
 

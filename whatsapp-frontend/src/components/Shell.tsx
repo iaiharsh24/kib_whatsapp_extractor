@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { api, clearSession, getUser } from "@/lib/api";
+import { api, clearSession, getUser, refreshSessionUser } from "@/lib/api";
 import { getPreference, loadPreferences, savePreference } from "@/lib/preferences";
 import {
   WORKSPACE_EVENT,
@@ -50,16 +50,17 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    setUser(getUser());
+    void refreshSessionUser().then((me) => setUser(me ?? getUser()));
     void loadWorkspaces()
       .then((list) => {
         setWorkspaces(list);
         setActiveWorkspace(getActiveWorkspace());
         return loadProjects();
       })
-      .catch(() => {
+      .catch((err) => {
         setWorkspaces([]);
         setProjects([]);
+        showShellError(err instanceof Error ? err.message : "Failed to load workspaces");
       });
   }, [pathname, loadProjects]);
 
