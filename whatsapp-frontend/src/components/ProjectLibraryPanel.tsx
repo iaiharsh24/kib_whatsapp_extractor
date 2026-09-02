@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { api, fileSrc, formatWhen } from "@/lib/api";
 import { readCache, writeCache } from "@/lib/cache";
 import LibraryFilters, {
@@ -25,6 +26,7 @@ const LIB_TABS = [
   { id: "image", label: "Images" },
   { id: "reel", label: "Reels" },
   { id: "link", label: "Links" },
+  { id: "document", label: "Documents" },
 ] as const;
 
 type LibTab = (typeof LIB_TABS)[number]["id"];
@@ -36,6 +38,7 @@ function tabCount(summary: UploadLibrarySummary | null, tab: LibTab, total: numb
   if (tab === "image") return summary.counts.image;
   if (tab === "reel") return summary.counts.reel;
   if (tab === "link") return summary.counts.link;
+  if (tab === "document") return summary.counts.document;
   return total;
 }
 
@@ -121,10 +124,24 @@ function MediaList({
               <div className="h-16 w-[51px] shrink-0 overflow-hidden rounded bg-zinc-100">
                 <img src={local} alt="" className="h-full w-full object-contain" />
               </div>
+            ) : item.type === "document" ? (
+              <div className="flex h-16 w-[51px] shrink-0 items-center justify-center rounded bg-amber-50 text-[9px] font-semibold uppercase text-amber-800">
+                Doc
+              </div>
             ) : null}
             <div className="min-w-0 flex-1">
               <p className="text-[10px] uppercase text-emerald-700">{item.type}</p>
               <ItemMeta item={item} editable knownTags={knownTags} />
+              {local && item.type === "document" ? (
+                <a
+                  href={local}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-0.5 inline-block text-[10px] font-medium text-emerald-700 hover:underline"
+                >
+                  Open file
+                </a>
+              ) : null}
             </div>
           </div>
         );
@@ -299,6 +316,11 @@ export default function ProjectLibraryPanel({
           <Chevron dir="left" />
         </span>
       </button>
+      <div className="border-b border-zinc-200 px-3 py-1.5">
+        <Link href="/library" className="text-[11px] font-medium text-emerald-700 hover:underline">
+          Open full library →
+        </Link>
+      </div>
 
       {loadError ? (
         <p className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{loadError}</p>
@@ -374,6 +396,7 @@ export default function ProjectLibraryPanel({
                   {row.counts.total} msgs
                   {row.counts.image > 0 ? ` · ${row.counts.image} img` : ""}
                   {row.counts.reel > 0 ? ` · ${row.counts.reel} reel` : ""}
+                  {row.counts.document > 0 ? ` · ${row.counts.document} doc` : ""}
                   {row.counts.link > 0 ? ` · ${row.counts.link} link` : ""}
                 </p>
                 <p className="text-[10px] text-zinc-400">{formatWhen(row.upload.uploaded_at)}</p>

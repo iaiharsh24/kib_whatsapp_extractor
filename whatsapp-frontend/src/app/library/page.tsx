@@ -1,5 +1,11 @@
-import { redirect } from "next/navigation";
+"use client";
 
-export default function LibraryRedirect() {
-  redirect("/");
+import LibraryBrowser from "@/components/LibraryBrowser";
+
+export default function LibraryPage() {
+  return (
+    <div className="flex h-full min-h-0 flex-1 overflow-hidden">
+      <LibraryBrowser />
+    </div>
+  );
 }

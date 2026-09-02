@@ -235,6 +235,15 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             {collapsed ? "P" : "Projects"}
           </Link>
           <Link
+            href="/library"
+            title="Library"
+            className={`rounded-md text-sm ${
+              collapsed ? "px-0 py-2 text-center" : "px-3 py-2"
+            } ${(pathname ?? "").startsWith("/library") ? "bg-emerald-500/20 text-emerald-200" : "text-zinc-300 hover:bg-white/5"}`}
+          >
+            {collapsed ? "L" : "Library"}
+          </Link>
+          <Link
             href="/tags"
             title="Tags"
             className={`rounded-md text-sm ${
