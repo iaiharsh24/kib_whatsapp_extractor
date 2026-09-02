@@ -114,3 +114,23 @@ body {
   border: none;
   padding: 0;
 }
+
+/* NodeResizer sizes the RF host; the shell must always fill that host. */
+.miro-board .react-flow__node-item,
+.miro-board .react-flow__node-note,
+.miro-board .react-flow__node-frame,
+.miro-board .react-flow__node-text,
+.miro-board .react-flow__node-shape,
+.miro-board .react-flow__node-comment,
+.miro-board .react-flow__node-draw,
+.miro-board .react-flow__node-group {
+  box-sizing: border-box;
+}
+
+.miro-board .canvas-node-shell {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  box-sizing: border-box;
+}

@@ -33,8 +33,11 @@ if DATABASE_URL:
         future=True,
         pool_pre_ping=True,
         pool_recycle=1800,
-        pool_size=5,
-        max_overflow=10,
+        # Canvas pages fan out many short DB lookups; keep headroom above the
+        # previous 5+10 ceiling that starved /api/projects when media flooded in.
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=10,
         connect_args={
             "connect_timeout": 5,
             "options": "-c idle_in_transaction_session_timeout=60000 -c statement_timeout=120000",

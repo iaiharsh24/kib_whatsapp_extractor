@@ -10,6 +10,7 @@ import {
   ReactFlow,
   SelectionMode,
   addEdge,
+  applyNodeChanges as applyChanges,
   getNodesBounds,
   getViewportForBounds,
   useEdgesState,
@@ -79,7 +80,7 @@ export default function StrategyBoard({
   initialViewport,
 }: BoardProps) {
   const { screenToFlowPosition, fitView, getNodes, getEdges, setViewport, zoomIn, zoomOut, zoomTo } = useReactFlow();
-  const [nodes, setNodes, applyNodeChanges] = useNodesState(
+  const [nodes, setNodes, onNodesChangeBase] = useNodesState(
     [...(initialFrames || []), ...(initialNodes || [])].map(withResizeStyle),
   );
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges || []);
@@ -585,7 +586,25 @@ export default function StrategyBoard({
   function onNodesChange(changes: NodeChange[]) {
     const dragging = changes.find((change): change is NodePositionChange => change.type === "position" && !!change.dragging && !!change.position);
     if (!dragging?.position) {
-      applyNodeChanges(changes);
+      setNodes((current) => {
+        const next = applyChanges(changes, current);
+        if (!changes.some((change) => change.type === "dimensions")) return next;
+        return next.map((node) => {
+          const touched = changes.some((change) => change.type === "dimensions" && change.id === node.id);
+          if (!touched) return node;
+          const w = node.width ?? node.measured?.width;
+          const h = node.height ?? node.measured?.height;
+          if (w == null && h == null) return node;
+          return {
+            ...node,
+            style: {
+              ...node.style,
+              ...(w != null ? { width: w } : null),
+              ...(h != null ? { height: h } : null),
+            },
+          };
+        });
+      });
       if (!changes.some((change) => change.type === "position" && "dragging" in change && change.dragging)) {
         setGuides({ x: null, y: null });
       }
@@ -593,12 +612,12 @@ export default function StrategyBoard({
     }
     const node = getNodes().find((item) => item.id === dragging.id);
     if (!node || !dragging.position) {
-      applyNodeChanges(changes);
+      onNodesChangeBase(changes);
       return;
     }
     const snapped = snapAndGuides(node, dragging.position, getNodes());
     setGuides(snapped.guides);
-    applyNodeChanges(
+    onNodesChangeBase(
       changes.map((change) =>
         change.type === "position" && change.id === dragging.id && change.position
           ? { ...change, position: snapped.position }
@@ -1108,14 +1127,23 @@ export default function StrategyBoard({
 }
 
 function stripNode(value: Node): Node {
-  if (value.data && typeof value.data === "object") {
-    const data = { ...(value.data as Record<string, unknown>) };
+  const w = value.width ?? value.measured?.width ?? value.style?.width;
+  const h = value.height ?? value.measured?.height ?? value.style?.height;
+  const next: Node = {
+    ...value,
+    style: {
+      ...value.style,
+      ...(w != null ? { width: w } : null),
+      ...(h != null ? { height: h } : null),
+    },
+  };
+  if (next.data && typeof next.data === "object") {
+    const data = { ...(next.data as Record<string, unknown>) };
     delete data.onChange;
-    const next = { ...value, data };
-    delete next.hidden;
-    return next;
+    next.data = data;
   }
-  return value;
+  delete next.hidden;
+  return next;
 }
 
 function stripEdge(value: Edge): Edge {

@@ -65,7 +65,17 @@ from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
 from app.vectors import delete_upload_vectors
 from app.zip_extract import delete_upload_files, find_extracted_file
-from db import AUTO_MIGRATE, DB_BACKEND, DB_PATH, DATABASE_URL, create_tables, current_schema_revision, get_db, seed_local_defaults
+from db import (
+    AUTO_MIGRATE,
+    DB_BACKEND,
+    DB_PATH,
+    DATABASE_URL,
+    SessionLocal,
+    create_tables,
+    current_schema_revision,
+    get_db,
+    seed_local_defaults,
+)
 from db.workspaces import ensure_personal_workspace
 from db.models import (
     ActivityLog,
@@ -542,7 +552,6 @@ async def startup():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     start_backup_scheduler()
     def _background_jobs():
-        from db import SessionLocal
         db = SessionLocal()
         try:
             backfill_message_types(db)
@@ -1746,21 +1755,28 @@ async def serve_extracted_file(
     exp: Optional[int] = Query(None),
     sig: Optional[str] = Query(None),
     creds: HTTPAuthorizationCredentials | None = Depends(bearer),
-    db: Session = Depends(get_db),
 ):
-    upload = db.query(Upload).filter(Upload.id == upload_id).first()
-    if not upload:
-        raise HTTPException(status_code=404, detail="Upload not found")
+    # Auth/lookup must finish and release the pool connection BEFORE FileResponse
+    # streams. Depends(get_db) stays checked out until the response body finishes,
+    # so a Strategy Canvas loading many images at once exhausted pool_size+overflow
+    # and made /api/projects/{id} (and even /health) hang until the API restarted.
+    db = SessionLocal()
+    try:
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
 
-    if exp is not None and sig:
-        if not verify_file_signature(upload_id, filename, exp, sig):
-            raise HTTPException(status_code=401, detail="File link expired or invalid")
-    else:
-        user = user_from_token(creds.credentials if creds else None, db)
-        if upload.project_id:
-            require_project_access(upload.project_id, user, db)
-        elif upload.workspace_id:
-            require_workspace_member(upload.workspace_id, user, db)
+        if exp is not None and sig:
+            if not verify_file_signature(upload_id, filename, exp, sig):
+                raise HTTPException(status_code=401, detail="File link expired or invalid")
+        else:
+            user = user_from_token(creds.credentials if creds else None, db)
+            if upload.project_id:
+                require_project_access(upload.project_id, user, db)
+            elif upload.workspace_id:
+                require_workspace_member(upload.workspace_id, user, db)
+    finally:
+        db.close()
 
     path = find_extracted_file(upload_id, unquote(filename))
     if path is None or not path.is_file():
@@ -2465,17 +2481,27 @@ async def list_backup_events(
 @app.get("/api/admin/db/snapshots/{snapshot_id}/download")
 async def download_db_snapshot(
     snapshot_id: str,
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_super_admin),
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
 ):
     from fastapi.responses import FileResponse as _FileResponse
-    snapshot = db.query(DbSnapshot).filter(DbSnapshot.id == snapshot_id).first()
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
-    path = os.path.abspath(snapshot.file_path)
+
+    # Same pool rule as serve_extracted_file: never stream a file while a session
+    # from Depends(get_db) is still open (require_super_admin would keep one).
+    db = SessionLocal()
+    try:
+        admin = user_from_token(creds.credentials if creds else None, db)
+        if not is_super_admin(admin):
+            raise HTTPException(status_code=403, detail="Not allowed")
+        snapshot = db.query(DbSnapshot).filter(DbSnapshot.id == snapshot_id).first()
+        if not snapshot:
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+        path = os.path.abspath(snapshot.file_path)
+        file_name = snapshot.file_name
+    finally:
+        db.close()
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Snapshot file missing from disk")
-    return _FileResponse(path, filename=snapshot.file_name)
+    return _FileResponse(path, filename=file_name)
 
 
 @app.delete("/api/admin/db/snapshots/{snapshot_id}")
