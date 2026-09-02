@@ -76,9 +76,8 @@ export const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "";
 export function fileSrc(path: string | null | undefined): string | null {
   if (!path) return null;
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  const token = getToken() || "";
   const prefix = path.startsWith("/") ? "" : "/";
-  return `${prefix}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+  return `${prefix}${path}`;
 }
 
 export function formatWhen(value?: string | null): string {

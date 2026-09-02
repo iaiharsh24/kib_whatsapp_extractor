@@ -53,6 +53,13 @@ from app.backups import (
     start_backup_scheduler,
 )
 from app.rate_limit import client_key, login_limiter, signup_limiter
+from app.file_access import sign_stored_file_path, signed_file_url, verify_file_signature, parse_sign_request_paths
+from app.upload_limits import (
+    MAX_UPLOAD_BYTES,
+    MAX_WORKSPACE_STORAGE_BYTES,
+    format_bytes,
+    workspace_storage_bytes,
+)
 from app.ingest import backfill_message_types, hydrate_link_previews, process_upload
 from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
@@ -243,6 +250,10 @@ class MessageTagsBody(BaseModel):
     tags: list[str] = []
 
 
+class FileSignBody(BaseModel):
+    paths: list[str] = []
+
+
 class ItemAdd(BaseModel):
     message_id: str
 
@@ -258,6 +269,9 @@ def serialize_message(message: Message) -> dict:
     http_url = message.extracted_url if str(message.extracted_url or "").startswith("http") else None
     stored = message.link_preview if isinstance(getattr(message, "link_preview", None), dict) else None
     preview = preview_for_message(message.raw_text, http_url, stored)
+    extracted = message.extracted_url
+    if extracted and str(extracted).startswith("/api/files/"):
+        extracted = sign_stored_file_path(str(extracted))
     return {
         "id": message.id,
         "upload_id": message.upload_id,
@@ -265,7 +279,7 @@ def serialize_message(message: Message) -> dict:
         "timestamp": message.timestamp.isoformat() if message.timestamp else None,
         "raw_text": message.raw_text,
         "type": message.type,
-        "extracted_url": message.extracted_url,
+        "extracted_url": extracted,
         "extracted_filename": message.extracted_filename,
         "context_before": message.context_before,
         "context_after": message.context_after,
@@ -1604,6 +1618,7 @@ async def patch_message_tags(
 
 @app.post("/api/uploads/file", status_code=201)
 async def upload_txt(
+    request: Request,
     project_id: str = Query(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -1613,6 +1628,30 @@ async def upload_txt(
     saved_name = file.filename or "chat.txt"
     if not saved_name.lower().endswith((".txt", ".zip")):
         raise HTTPException(status_code=400, detail="Upload a WhatsApp .txt export (or a zip that contains one).")
+
+    if project.workspace_id:
+        used = workspace_storage_bytes(project.workspace_id, db)
+        if used >= MAX_WORKSPACE_STORAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Workspace storage limit reached ({format_bytes(MAX_WORKSPACE_STORAGE_BYTES)}). "
+                    "Delete old uploads or contact an admin."
+                ),
+            )
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            declared = 0
+        if declared > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large (max {format_bytes(MAX_UPLOAD_BYTES)} per upload).",
+            )
+
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     upload = Upload(
         workspace_id=project.workspace_id,
@@ -1637,26 +1676,96 @@ async def upload_txt(
     db.commit()
     db.refresh(upload)
     dest = os.path.join(UPLOAD_DIR, f"{upload.id}_{os.path.basename(saved_name)}")
-    with open(dest, "wb") as handle:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            handle.write(chunk)
+    written = 0
+    try:
+        with open(dest, "wb") as handle:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large (max {format_bytes(MAX_UPLOAD_BYTES)} per upload).",
+                    )
+                handle.write(chunk)
+    except HTTPException:
+        try:
+            if os.path.isfile(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+        db.delete(upload)
+        db.commit()
+        raise
+
+    if project.workspace_id:
+        used_after = workspace_storage_bytes(project.workspace_id, db)
+        if used_after > MAX_WORKSPACE_STORAGE_BYTES:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            db.delete(upload)
+            db.commit()
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Workspace storage limit reached ({format_bytes(MAX_WORKSPACE_STORAGE_BYTES)}). "
+                    "Delete old uploads or contact an admin."
+                ),
+            )
 
     threading.Thread(target=process_upload, args=(upload.id, dest), daemon=True).start()
     return serialize_upload(upload, user.username)
+
+
+@app.post("/api/files/sign")
+async def sign_file_urls(
+    body: FileSignBody,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Mint short-lived signed URLs for stored media paths (no session JWT in query strings)."""
+    urls: dict[str, str] = {}
+    for original, upload_id, filename in parse_sign_request_paths(body.paths):
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if not upload:
+            continue
+        if upload.project_id:
+            require_project_access(upload.project_id, user, db)
+        elif upload.workspace_id:
+            require_workspace_member(upload.workspace_id, user, db)
+        else:
+            continue
+        urls[original] = signed_file_url(upload_id, filename)
+    return {"urls": urls}
 
 
 @app.get("/api/files/{upload_id}/{filename:path}")
 async def serve_extracted_file(
     upload_id: str,
     filename: str,
-    token: Optional[str] = Query(None),
+    exp: Optional[int] = Query(None),
+    sig: Optional[str] = Query(None),
     creds: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: Session = Depends(get_db),
 ):
-    user_from_token(creds.credentials if creds else token, db)
+    upload = db.query(Upload).filter(Upload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    if exp is not None and sig:
+        if not verify_file_signature(upload_id, filename, exp, sig):
+            raise HTTPException(status_code=401, detail="File link expired or invalid")
+    else:
+        user = user_from_token(creds.credentials if creds else None, db)
+        if upload.project_id:
+            require_project_access(upload.project_id, user, db)
+        elif upload.workspace_id:
+            require_workspace_member(upload.workspace_id, user, db)
+
     path = find_extracted_file(upload_id, unquote(filename))
     if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="Extracted file not found")

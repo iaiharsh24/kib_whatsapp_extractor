@@ -7,13 +7,15 @@ from pathlib import Path
 
 from app.parser import HEADER_ANDROID, HEADER_IOS
 
+from app.upload_limits import MAX_UPLOAD_BYTES, MAX_WORKSPACE_STORAGE_BYTES
+
 ROOT = Path(__file__).resolve().parents[2]
 EXTRACT_DIR = Path(ROOT) / "local_data" / "extracted"
 UPLOAD_DIR = Path(ROOT) / "local_data" / "uploads"
 SKIP_DIRS = {"node_modules", ".git", "__macosx", ".venv", "dist", "build"}
 CHAT_BASENAMES = {"_chat.txt", "chat.txt"}
-MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
-MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+MAX_MEMBER_BYTES = MAX_UPLOAD_BYTES
+MAX_TOTAL_BYTES = MAX_WORKSPACE_STORAGE_BYTES
 
 
 def looks_like_zip(path: Path) -> bool:
@@ -58,7 +60,9 @@ def extract_zip(zip_path: Path, dest: Path) -> None:
                 continue
             total += info.file_size
             if total > MAX_TOTAL_BYTES:
-                raise ValueError("Zip is larger than the local extract limit (8 GB).")
+                raise ValueError(
+                    f"Zip is larger than the local extract limit ({MAX_TOTAL_BYTES // (1024 * 1024 * 1024)} GB)."
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as source, target.open("wb") as out:
                 shutil.copyfileobj(source, out)
