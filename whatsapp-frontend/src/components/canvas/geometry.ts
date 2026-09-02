@@ -14,6 +14,49 @@ export function nodeSize(node: Node) {
   };
 }
 
+/** Default pixel size so link/media cards can be resized on first select. */
+export function defaultItemSize(messageType?: string | null) {
+  const type = (messageType || "").toLowerCase();
+  if (type === "reel") return { width: 208, height: 400 };
+  if (type === "image" || type === "media_omitted") return { width: 224, height: 300 };
+  if (type === "document") return { width: 256, height: 180 };
+  return { width: 256, height: 200 };
+}
+
+/** Ensure a node has explicit width/height so NodeResizer can stretch it. */
+export function withResizeStyle(node: Node): Node {
+  const width = node.style?.width ?? node.width;
+  const height = node.style?.height ?? node.height;
+  if (width != null && height != null) {
+    return {
+      ...node,
+      style: { ...node.style, width, height },
+    };
+  }
+  if (node.type === "item") {
+    const size = defaultItemSize((node.data as { type?: string } | undefined)?.type);
+    return {
+      ...node,
+      style: {
+        ...node.style,
+        width: width ?? size.width,
+        height: height ?? size.height,
+      },
+    };
+  }
+  if (node.type === "comment") {
+    return {
+      ...node,
+      style: {
+        ...node.style,
+        width: width ?? 224,
+        height: height ?? 120,
+      },
+    };
+  }
+  return node;
+}
+
 export function absolutePosition(node: Node, byId: Map<string, Node>) {
   let x = node.position.x;
   let y = node.position.y;

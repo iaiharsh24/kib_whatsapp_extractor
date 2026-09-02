@@ -1,5 +1,8 @@
 # Optional PostgreSQL overlay. Use:
 #   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+#
+# Primary + mirror: two separate Postgres instances on the internal Docker network.
+# Neither publishes a host port — only Caddy (80/443) is public.
 services:
   postgres:
     image: postgres:16-alpine
@@ -16,11 +19,34 @@ services:
       timeout: 5s
       retries: 5
 
+  # Always-on snapshot copy of primary. Refreshed after every successful pg_dump.
+  # External volume so `docker compose down -v` cannot delete it.
+  postgres_mirror:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-whatsapp}
+      POSTGRES_USER: ${POSTGRES_USER:-whatsapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_mirror_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whatsapp} -d ${POSTGRES_DB:-whatsapp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   api:
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-whatsapp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-whatsapp}
+      DATABASE_MIRROR_URL: postgresql+psycopg2://${POSTGRES_USER:-whatsapp}:${POSTGRES_PASSWORD}@postgres_mirror:5432/${POSTGRES_DB:-whatsapp}
+      WA_DB_MIRROR_ENABLED: ${WA_DB_MIRROR_ENABLED:-1}
+      # Schema changes never apply on boot unless you explicitly set this to 1.
+      WA_AUTO_MIGRATE: ${WA_AUTO_MIGRATE:-0}
     depends_on:
       postgres:
+        condition: service_healthy
+      postgres_mirror:
         condition: service_healthy
 
 # Declared external so `docker compose down -v` refuses to delete them. Both are
@@ -29,6 +55,9 @@ volumes:
   postgres_data:
     external: true
     name: ${POSTGRES_VOLUME_NAME:-kib_whatsapp_extractor_postgres_data}
+  postgres_mirror_data:
+    external: true
+    name: ${POSTGRES_MIRROR_VOLUME_NAME:-kib_whatsapp_extractor_postgres_mirror_data}
   app_data:
     external: true
     name: ${APP_DATA_VOLUME_NAME:-kib_whatsapp_extractor_app_data}

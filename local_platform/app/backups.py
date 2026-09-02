@@ -6,6 +6,10 @@ Layout under WA_BACKUP_DIR (a host bind-mount in production, so it survives
     <WA_BACKUP_DIR>/db/     gzipped pg_dump (.sql.gz) or SQLite copies (.db)
     <WA_BACKUP_DIR>/files/  append-only mirror of uploads/ and extracted/
 
+After each successful Postgres dump, the same dump is restored into a second
+Postgres instance (postgres_mirror) so a full DB copy always exists separately
+from the primary volume.
+
 The file mirror never deletes, so removing an upload through the API still
 leaves its media recoverable. Every DB snapshot is recorded in db_snapshots
 with summary stats, and failures are tracked so /health can report them.
@@ -20,6 +24,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 from sqlalchemy import func
 
@@ -46,6 +51,14 @@ DATA_DIR = os.getenv("WA_DATA_DIR", os.path.join(_PROJECT_ROOT, "..", "local_dat
 MIRROR_FILES = (os.getenv("WA_BACKUP_MIRROR_FILES", "1") or "1").lower() not in {"0", "false", "no"}
 MIRRORED_DIRS = ("uploads", "extracted")
 
+# Second Postgres that always holds the latest dump (separate Docker volume).
+DATABASE_MIRROR_URL = (os.getenv("DATABASE_MIRROR_URL") or "").strip()
+DB_MIRROR_ENABLED = (os.getenv("WA_DB_MIRROR_ENABLED", "1") or "1").lower() not in {
+    "0",
+    "false",
+    "no",
+} and bool(DATABASE_MIRROR_URL)
+
 # Optional alert webhook (Slack/Discord/healthchecks.io/Teams all accept a POST).
 # No-op when unset, so this is safe by default. On failure (and on first success
 # after failures) we POST a small JSON payload so silent backup death can't recur.
@@ -65,6 +78,58 @@ _backup_lock = threading.RLock()
 # In-memory mirror of the latest BackupEvent, so /health stays fast and still
 # works before the first event is persisted. The DB table is the source of truth.
 _latest_event: dict | None = None
+_mirror_state: dict = {
+    "enabled": DB_MIRROR_ENABLED,
+    "healthy": None,
+    "last_success_at": None,
+    "last_error": None,
+    "last_error_at": None,
+    "target": DATABASE_MIRROR_URL.split("@")[-1] if DATABASE_MIRROR_URL else None,
+}
+
+
+def _mirror_status_path() -> Path:
+    return Path(BACKUP_DIR) / "db_mirror_status.json"
+
+
+def _load_mirror_state() -> dict:
+    """Cross-worker mirror status (uvicorn runs multiple processes)."""
+    state = {
+        "enabled": DB_MIRROR_ENABLED,
+        "healthy": None,
+        "last_success_at": None,
+        "last_error": None,
+        "last_error_at": None,
+        "target": DATABASE_MIRROR_URL.split("@")[-1] if DATABASE_MIRROR_URL else None,
+    }
+    path = _mirror_status_path()
+    try:
+        if path.is_file():
+            import json
+
+            disk = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(disk, dict):
+                state.update(disk)
+    except Exception:
+        pass
+    state["enabled"] = DB_MIRROR_ENABLED
+    state["target"] = DATABASE_MIRROR_URL.split("@")[-1] if DATABASE_MIRROR_URL else None
+    return state
+
+
+def _save_mirror_state(**updates) -> None:
+    state = _load_mirror_state()
+    state.update(updates)
+    _mirror_state.clear()
+    _mirror_state.update(state)
+    path = _mirror_status_path()
+    try:
+        import json
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[backups] could not persist mirror status: {exc}", flush=True)
 
 
 class BackupError(RuntimeError):
@@ -161,6 +226,7 @@ def backup_status() -> dict:
             "last_error": None,
             "last_error_at": None,
             "consecutive_failures": 0,
+            "db_mirror": _load_mirror_state(),
         }
 
     created = latest.created_at
@@ -191,8 +257,10 @@ def backup_status() -> dict:
 
     cf = latest.consecutive_failures or 0
     stale = last_success_age is None or last_success_age > BACKUP_INTERVAL_SECONDS * 2 + 300
+    mirror_state = _load_mirror_state()
+    mirror_ok = (not DB_MIRROR_ENABLED) or (mirror_state.get("healthy") is not False)
     return {
-        "healthy": bool(last_success_at) and not stale and cf == 0,
+        "healthy": bool(last_success_at) and not stale and cf == 0 and mirror_ok,
         "directory": BACKUP_DIR,
         "interval_seconds": BACKUP_INTERVAL_SECONDS,
         "last_success_at": last_success_at,
@@ -201,6 +269,7 @@ def backup_status() -> dict:
         "last_error": latest.error if latest.outcome == "failure" else None,
         "last_error_at": created.isoformat() if latest.outcome == "failure" else None,
         "consecutive_failures": cf,
+        "db_mirror": _load_mirror_state(),
     }
 
 
@@ -275,6 +344,151 @@ def _snapshot_postgres(target: Path) -> None:
     with raw.open("rb") as src, gzip.open(target, "wb", compresslevel=6) as dst:
         shutil.copyfileobj(src, dst)
     raw.unlink(missing_ok=True)
+
+
+def _libpq_url(url: str) -> str:
+    """Convert SQLAlchemy URLs to libpq form for psql/pg_dump."""
+    if "+" in url.split("://", 1)[0]:
+        scheme, rest = url.split("://", 1)
+        return f"{scheme.split('+', 1)[0]}://{rest}"
+    return url
+
+
+def _mirror_psql_env() -> dict:
+    """Build env for psql against the snapshot database (never the primary)."""
+    parsed = urlparse(_libpq_url(DATABASE_MIRROR_URL))
+    if parsed.scheme not in {"postgresql", "postgres"}:
+        raise BackupError(f"unsupported DATABASE_MIRROR_URL scheme: {parsed.scheme}")
+    dbname = (parsed.path or "/whatsapp").lstrip("/") or "whatsapp"
+    env = os.environ.copy()
+    env["PGHOST"] = parsed.hostname or "postgres_mirror"
+    env["PGPORT"] = str(parsed.port or 5432)
+    env["PGUSER"] = unquote(parsed.username or "whatsapp")
+    env["PGPASSWORD"] = unquote(parsed.password or "")
+    env["PGDATABASE"] = dbname
+    return env
+
+
+def refresh_mirror_database(dump_path: Path) -> None:
+    """Replace the snapshot Postgres DB with the contents of a verified dump.
+
+    This never touches the primary DATABASE_URL — only DATABASE_MIRROR_URL.
+    Uses a cross-process lock because uvicorn runs multiple workers.
+    """
+    if not DB_MIRROR_ENABLED:
+        return
+    if DB_BACKEND != "postgresql":
+        return
+    if not dump_path.is_file():
+        raise BackupError(f"mirror refresh missing dump: {dump_path}")
+
+    import fcntl
+
+    lock_path = Path(BACKUP_DIR) / ".mirror_refresh.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _refresh_mirror_database_locked(dump_path)
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        lock_fd.close()
+
+
+def _refresh_mirror_database_locked(dump_path: Path) -> None:
+    env = _mirror_psql_env()
+    dbname = env["PGDATABASE"]
+    owner = env["PGUSER"]
+    admin_env = env.copy()
+    admin_env["PGDATABASE"] = "postgres"
+    tmp_sql = Path(BACKUP_DIR) / f".mirror_restore_{os.getpid()}.sql"
+
+    # Recreate an empty snapshot DB so restore never fights leftover locks/sessions.
+    # DROP DATABASE cannot run inside a multi-statement transaction block.
+    try:
+        subprocess.run(
+            [
+                "psql",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                (
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    f"WHERE datname = '{dbname}' AND pid <> pg_backend_pid();"
+                ),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+            env=admin_env,
+        )
+        subprocess.run(
+            ["psql", "-v", "ON_ERROR_STOP=1", "-c", f'DROP DATABASE IF EXISTS "{dbname}";'],
+            check=True,
+            capture_output=True,
+            timeout=60,
+            env=admin_env,
+        )
+        subprocess.run(
+            [
+                "psql",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                f'CREATE DATABASE "{dbname}" OWNER "{owner}";',
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+            env=admin_env,
+        )
+        with gzip.open(dump_path, "rb") as src, tmp_sql.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        subprocess.run(
+            ["psql", "-v", "ON_ERROR_STOP=1", "--quiet", "-f", str(tmp_sql)],
+            check=True,
+            capture_output=True,
+            timeout=1800,
+            env=env,
+        )
+        check = subprocess.run(
+            ["psql", "-v", "ON_ERROR_STOP=1", "-tAc", "SELECT count(*) FROM users"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+            env=env,
+            text=True,
+        )
+        if not (check.stdout or "").strip().isdigit():
+            raise BackupError("mirror refresh verification failed (users table)")
+    except FileNotFoundError as exc:
+        raise BackupError("psql is not installed in the API image") from exc
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr
+        if isinstance(err, bytes):
+            detail = err.decode("utf-8", errors="replace").strip()
+        else:
+            detail = (err or str(exc)).strip()
+        _save_mirror_state(
+            healthy=False,
+            last_error=detail[:500] or str(exc),
+            last_error_at=_utcnow().isoformat(),
+        )
+        raise BackupError(f"mirror refresh failed: {detail[:500]}") from exc
+    finally:
+        tmp_sql.unlink(missing_ok=True)
+
+    _save_mirror_state(
+        enabled=True,
+        healthy=True,
+        last_success_at=_utcnow().isoformat(),
+        last_error=None,
+        last_error_at=None,
+        target=DATABASE_MIRROR_URL.split("@")[-1],
+    )
 
 
 def mirror_data_files() -> dict:
@@ -378,6 +592,36 @@ def run_backup(kind: str = "scheduled", notes: str | None = None, mirror: bool =
 
         size = target.stat().st_size if target.is_file() else 0
         file_stats = mirror_data_files() if mirror else {"enabled": False}
+
+        # Keep a second live Postgres copy in sync with every successful dump.
+        if DB_BACKEND == "postgresql" and DB_MIRROR_ENABLED:
+            try:
+                refresh_mirror_database(target)
+                file_stats = {**(file_stats or {}), "db_mirror": "ok"}
+            except BackupError as exc:
+                # Dump file is still valid; mark overall backup unhealthy via mirror state.
+                print(f"[backups] dump ok but mirror refresh failed: {exc}", flush=True)
+                file_stats = {**(file_stats or {}), "db_mirror": f"failed: {exc}"}
+                cf = _current_consecutive_failures() + 1
+                _persist_event(
+                    "failure",
+                    kind=kind,
+                    file_name=file_name,
+                    size_bytes=size,
+                    error=f"mirror refresh failed: {exc}",
+                    consecutive_failures=cf,
+                )
+                if cf >= ALERT_MIN_FAILURES:
+                    _fire_alert({
+                        "source": "whatsapp-strategy-canvas",
+                        "severity": "critical",
+                        "event": "backup_mirror_failed",
+                        "consecutive_failures": cf,
+                        "error": str(exc),
+                        "backend": DB_BACKEND,
+                        "directory": BACKUP_DIR,
+                    })
+                raise
 
         db = SessionLocal()
         try:
@@ -507,6 +751,19 @@ def prune_old_snapshots() -> int:
 
 
 def _scheduler_loop() -> None:
+    import fcntl
+
+    # Uvicorn --workers 2 would otherwise start two schedulers and race the mirror.
+    lock_path = Path(BACKUP_DIR) / ".backup_scheduler.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("[backups] scheduler already running in another worker — skipping", flush=True)
+        lock_fd.close()
+        return
+
     # Back up shortly after startup so a fresh deploy is never left unprotected.
     time.sleep(20)
     while True:

@@ -1,0 +1,12 @@
+---
+description: Never run DB migrations or schema changes unless the user explicitly asks
+alwaysApply: true
+---
+
+# Database safety
+
+- **Never** run Alembic (`upgrade`, `downgrade`, `stamp`), `create_tables` with auto-migrate, or `deploy/migrate.sh` unless the user **explicitly** asks to migrate / change the schema in that message.
+- **Never** set `WA_AUTO_MIGRATE=1` on the VPS or in `.env` unless the user explicitly requests a one-shot migration and tells you to flip it back off afterward.
+- App boot must **not** apply schema migrations. Default is `WA_AUTO_MIGRATE=0`.
+- Prefer file dumps + the `postgres_mirror` snapshot database for recovery; do not drop, recreate, or restore into the **primary** database unless the user explicitly asks.
+- Do not expose Postgres ports on the host. Only Caddy (80/443) and SSH should be public.

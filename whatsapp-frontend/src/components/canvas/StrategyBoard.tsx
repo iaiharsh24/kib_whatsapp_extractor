@@ -35,6 +35,7 @@ import {
   collectWithChildren,
   connectedMediaNoteCluster,
   containsPoint,
+  defaultItemSize,
   distribute,
   frameAt,
   groupSelected,
@@ -46,6 +47,7 @@ import {
   snapAndGuides,
   ungroupSelected,
   withParent,
+  withResizeStyle,
   type Guides,
 } from "./geometry";
 import { buildTemplate } from "./templates";
@@ -77,7 +79,9 @@ export default function StrategyBoard({
   initialViewport,
 }: BoardProps) {
   const { screenToFlowPosition, fitView, getNodes, getEdges, setViewport, zoomIn, zoomOut, zoomTo } = useReactFlow();
-  const [nodes, setNodes, applyNodeChanges] = useNodesState([...(initialFrames || []), ...(initialNodes || [])]);
+  const [nodes, setNodes, applyNodeChanges] = useNodesState(
+    [...(initialFrames || []), ...(initialNodes || [])].map(withResizeStyle),
+  );
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges || []);
   const [tool, setTool] = useState<CanvasTool>("select");
   const [drawMode, setDrawMode] = useState<DrawMode>("pen");
@@ -373,6 +377,7 @@ export default function StrategyBoard({
       id: uid("msg"),
       type: "item",
       position,
+      style: defaultItemSize(message.type),
       data: {
         messageId: message.id,
         type: message.type,

@@ -65,7 +65,7 @@ from app.llm import build_prompt, complete
 from app.previews import fetch_preview, is_fetchable_url, preview_for_message
 from app.vectors import delete_upload_vectors
 from app.zip_extract import delete_upload_files, find_extracted_file
-from db import DB_BACKEND, DB_PATH, DATABASE_URL, create_tables, get_db, seed_local_defaults
+from db import AUTO_MIGRATE, DB_BACKEND, DB_PATH, DATABASE_URL, create_tables, current_schema_revision, get_db, seed_local_defaults
 from db.workspaces import ensure_personal_workspace
 from db.models import (
     ActivityLog,
@@ -562,6 +562,8 @@ async def health():
         "db": DB_BACKEND,
         "db_path": DB_PATH if DB_BACKEND == "sqlite" else None,
         "database_url": DATABASE_URL.split("@")[-1] if DATABASE_URL else None,
+        "auto_migrate": AUTO_MIGRATE,
+        "schema_revision": current_schema_revision(),
         "backups": backups,
     }
 

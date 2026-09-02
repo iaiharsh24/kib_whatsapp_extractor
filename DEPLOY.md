@@ -189,27 +189,27 @@ chmod +x deploy/upgrade-postgres.sh
 docker compose exec -T postgres pg_dump -U whatsapp whatsapp | gzip > db-$(date +%F).sql.gz
 ```
 
-## 7b. Schema migrations (Alembic)
+## 7b. Schema migrations (Alembic) — explicit only
 
-Schema changes are owned by Alembic (`local_platform/alembic/`). On every boot the
-API runs `alembic upgrade head`, so pending migrations apply automatically — there
-is no longer any hand-rolled `ALTER TABLE` running on every restart. Existing
-databases were stamped to the `0001_baseline` revision once on first boot after
-the switch, so they skip the baseline and only apply newer revisions.
+Schema changes are owned by Alembic (`local_platform/alembic/`). **Boot never
+migrates.** `WA_AUTO_MIGRATE` defaults to `0`; the API only checks that tables
+exist and refuses to start against an empty database.
 
-To add a schema change (from `local_platform/`):
+To apply a schema change (only when you intentionally want it):
 
 ```bash
-# autogenerate a revision from model changes
-alembic revision --autogenerate -m "add foo column to messages"
-# edit the generated file under alembic/versions/, then
-alembic upgrade head      # apply locally
-git add local_platform/alembic/versions/   # commit it
-# on the VPS, ./deploy/upgrade-postgres.sh runs upgrade head on boot
+# From local_platform/ — create a revision, commit it, pull on the VPS, then:
+./deploy/migrate.sh
 ```
+
+`deploy/migrate.sh` takes a pre-migration dump, then runs `alembic upgrade`
+inside the API container. Never leave `WA_AUTO_MIGRATE=1` set in `.env`.
 
 Never edit a revision that has already been deployed — add a new one instead.
 
+A second Postgres (`postgres_mirror`) is refreshed from every successful dump
+into volume `kib_whatsapp_extractor_postgres_mirror_data`, so a full DB copy
+always exists separately from the primary.
 
 Enable **daily** backups in hPanel: VPS → Backups → Backup schedule → Daily.
 

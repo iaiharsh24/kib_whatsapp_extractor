@@ -58,12 +58,41 @@ body {
   stroke: #4262ff;
 }
 
-.miro-board .react-flow__resize-control.handle {
-  width: 8px;
-  height: 8px;
+.miro-board .react-flow__resize-control.handle,
+.miro-board .canvas-resize-handle {
+  width: 9px;
+  height: 9px;
   border: 2px solid #4262ff;
   background: #fff;
   border-radius: 2px;
+}
+
+/* Edge strips: horizontal / vertical resize hit targets */
+.miro-board .react-flow__resize-control.line,
+.miro-board .canvas-resize-line {
+  border-color: transparent;
+  border-width: 0;
+}
+
+.miro-board .react-flow__resize-control.line.left,
+.miro-board .react-flow__resize-control.line.right,
+.miro-board .canvas-resize-line.left,
+.miro-board .canvas-resize-line.right {
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.miro-board .react-flow__resize-control.line.top,
+.miro-board .react-flow__resize-control.line.bottom,
+.miro-board .canvas-resize-line.top,
+.miro-board .canvas-resize-line.bottom {
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.miro-board .react-flow__resize-control.line:hover,
+.miro-board .canvas-resize-line:hover {
+  background: rgba(66, 98, 255, 0.18);
 }
 
 .miro-board .react-flow__minimap.canvas-tracker {

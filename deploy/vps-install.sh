@@ -65,6 +65,8 @@ ADMIN_EMAIL=$ADMIN_EMAIL
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 ADMIN_USERNAME=$ADMIN_USERNAME
 BACKUP_HOST_DIR=$BACKUP_HOST_DIR
+WA_AUTO_MIGRATE=0
+WA_DB_MIRROR_ENABLED=1
 EOF
 chmod 600 .env
 
@@ -75,6 +77,7 @@ chmod 700 "$BACKUP_HOST_DIR"
 # External volumes survive `docker compose down -v`.
 echo "==> Ensuring data volumes exist..."
 docker volume create kib_whatsapp_extractor_postgres_data >/dev/null
+docker volume create kib_whatsapp_extractor_postgres_mirror_data >/dev/null
 docker volume create kib_whatsapp_extractor_app_data >/dev/null
 
 echo "==> Building and starting containers..."

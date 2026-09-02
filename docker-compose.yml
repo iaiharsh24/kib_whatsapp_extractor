@@ -16,6 +16,10 @@ services:
       WA_BACKUP_INTERVAL_SECONDS: ${WA_BACKUP_INTERVAL_SECONDS:-3600}
       WA_BACKUP_MIRROR_FILES: ${WA_BACKUP_MIRROR_FILES:-1}
       WA_REQUIRE_BACKUP_BEFORE_DELETE: ${WA_REQUIRE_BACKUP_BEFORE_DELETE:-1}
+      # Never apply Alembic on boot unless explicitly set to 1 for a one-shot migrate.
+      WA_AUTO_MIGRATE: ${WA_AUTO_MIGRATE:-0}
+      WA_DB_MIRROR_ENABLED: ${WA_DB_MIRROR_ENABLED:-1}
+      DATABASE_MIRROR_URL: ${DATABASE_MIRROR_URL:-}
       # Optional: POST a JSON alert here on backup failure (and on recovery).
       # Leave blank to disable. Slack/Discord/Teams/healthchecks.io all work.
       WA_BACKUP_ALERT_WEBHOOK: ${WA_BACKUP_ALERT_WEBHOOK:-}

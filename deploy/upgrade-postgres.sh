@@ -43,7 +43,11 @@ chmod 700 "$BACKUP_HOST_DIR"
 # `docker compose down -v` cannot delete them. Creating is a no-op if present.
 echo "==> Ensuring data volumes exist"
 docker volume create kib_whatsapp_extractor_postgres_data >/dev/null
+docker volume create kib_whatsapp_extractor_postgres_mirror_data >/dev/null
 docker volume create kib_whatsapp_extractor_app_data >/dev/null
+
+env_set WA_AUTO_MIGRATE 0
+env_set WA_DB_MIRROR_ENABLED 1
 
 echo "==> Taking a pre-upgrade safety dump"
 if docker ps --format '{{.Names}}' | grep -q '^kib_whatsapp_extractor-postgres-1$'; then
@@ -86,6 +90,8 @@ done
 echo ""
 echo "Upgrade complete."
 echo "  Database : PostgreSQL (external volume kib_whatsapp_extractor_postgres_data)"
+echo "  Mirror DB: PostgreSQL snapshot (kib_whatsapp_extractor_postgres_mirror_data)"
 echo "  Media    : external volume kib_whatsapp_extractor_app_data"
 echo "  Backups  : $BACKUP_HOST_DIR (on the host, outside Docker volumes)"
+echo "  Migrate  : ./deploy/migrate.sh  (only when explicitly requested — never on boot)"
 echo "  Restore  : ./deploy/restore-postgres.sh <dump.sql.gz>"

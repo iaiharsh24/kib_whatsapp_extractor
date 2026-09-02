@@ -1,4 +1,8 @@
-"""Database session, schema migrations (Alembic), and default admin seed."""
+"""Database session, schema readiness checks, and default admin seed.
+
+Schema migrations are NOT applied on boot unless WA_AUTO_MIGRATE=1.
+Use deploy/migrate.sh (or an explicit operator request) to run Alembic.
+"""
 import os
 from pathlib import Path
 
@@ -13,6 +17,8 @@ DB_PATH = os.getenv(
     os.path.join(_PROJECT_ROOT, "local_data", "strategy.db"),
 )
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+# Default OFF: restarts / deploys must never mutate schema without an explicit ask.
+AUTO_MIGRATE = (os.getenv("WA_AUTO_MIGRATE", "0") or "0").lower() in {"1", "true", "yes"}
 
 if DATABASE_URL:
     # Safety net for the whole app, not just one endpoint: if any code path ever
@@ -84,18 +90,7 @@ def get_db():
         db.close()
 
 
-def _run_alembic_on_startup() -> None:
-    """Bring the database schema up to the latest Alembic revision.
-
-    - Existing pre-Alembic databases (tables present, no alembic_version row) are
-      stamped to the baseline revision once. They are already at the current
-      schema because the legacy boot migrations ran on them before; stamping
-      means we never re-run those scans/UPDATEs on every restart.
-    - Fresh empty databases get `upgrade head`, which runs the baseline revision
-      (Base.metadata.create_all) and any newer revisions.
-    - Already-versioned databases get `upgrade head` to apply pending revisions.
-    """
-    from alembic import command
+def _alembic_config():
     from alembic.config import Config
 
     cfg = Config(str(Path(_PROJECT_ROOT) / "local_platform" / "alembic.ini"))
@@ -106,7 +101,41 @@ def _run_alembic_on_startup() -> None:
     cfg.set_main_option(
         "sqlalchemy.url", DATABASE_URL or f"sqlite+pysqlite:///{DB_PATH}"
     )
+    return cfg
 
+
+def current_schema_revision() -> str | None:
+    """Return the Alembic revision stamped in the live DB, or None."""
+    insp = inspect(engine)
+    if "alembic_version" not in insp.get_table_names():
+        return None
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).first()
+    return row[0] if row else None
+
+
+def _assert_schema_present() -> None:
+    """Refuse to start against an empty / unusable DB when auto-migrate is off."""
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    if "users" not in tables:
+        raise RuntimeError(
+            "Database has no application schema and WA_AUTO_MIGRATE=0. "
+            "Migrations are intentionally disabled on boot. "
+            "Run ./deploy/migrate.sh only when explicitly requested."
+        )
+    revision = current_schema_revision()
+    if revision:
+        print(f"[db] schema present (alembic={revision}); auto-migrate off — no upgrade")
+    else:
+        print("[db] schema present (no alembic_version); auto-migrate off — no stamp/upgrade")
+
+
+def _run_alembic_upgrade() -> None:
+    """Apply Alembic revisions. Only called when WA_AUTO_MIGRATE=1 or migrate.sh."""
+    from alembic import command
+
+    cfg = _alembic_config()
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
     has_alembic_row = False
@@ -119,15 +148,19 @@ def _run_alembic_on_startup() -> None:
         print("[db] stamping existing database to Alembic baseline (0001_baseline)")
         command.stamp(cfg, "0001_baseline")
     else:
+        print("[db] running alembic upgrade head (WA_AUTO_MIGRATE enabled)")
         command.upgrade(cfg, "head")
 
 
 def create_tables():
-    """Create/upgrade the schema via Alembic, then report the backend location."""
+    """Ensure DB is reachable and schema is ready — without migrating by default."""
     wait_for_database()
-    _run_alembic_on_startup()
+    if AUTO_MIGRATE:
+        _run_alembic_upgrade()
+    else:
+        _assert_schema_present()
     location = DATABASE_URL.split("@")[-1] if DATABASE_URL else DB_PATH
-    print(f"Schema ready ({DB_BACKEND}) at: {location}")
+    print(f"Schema ready ({DB_BACKEND}) at: {location} (auto_migrate={AUTO_MIGRATE})")
 
 
 def seed_local_defaults():
