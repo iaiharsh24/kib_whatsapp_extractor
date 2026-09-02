@@ -595,12 +595,13 @@ export default function StrategyBoard({
           const w = node.width ?? node.measured?.width;
           const h = node.height ?? node.measured?.height;
           if (w == null && h == null) return node;
+          const currentStyle = (node as Node).style || {};
           return {
             ...node,
             style: {
-              ...node.style,
-              ...(w != null ? { width: w } : null),
-              ...(h != null ? { height: h } : null),
+              ...currentStyle,
+              ...(w != null ? { width: w } : {}),
+              ...(h != null ? { height: h } : {}),
             },
           };
         });
