@@ -327,11 +327,7 @@ export default function DocumentReader({
           const buffer = (await fetchSigned(href, "arrayBuffer")) as ArrayBuffer;
           if (cancelled) return;
           const mammothMod = await import("mammoth");
-          const convertToHtml =
-            mammothMod.convertToHtml ||
-            (mammothMod as { default?: { convertToHtml: typeof mammothMod.convertToHtml } }).default?.convertToHtml;
-          if (!convertToHtml) throw new Error("DOCX reader failed to load");
-          const result = await convertToHtml({ arrayBuffer: buffer });
+          const result = await mammothMod.convertToHtml({ arrayBuffer: buffer });
           if (cancelled) return;
           setHtml(result.value || "<p><em>Empty document.</em></p>");
         }
