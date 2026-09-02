@@ -15,6 +15,12 @@ DB_PATH = os.getenv(
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
 if DATABASE_URL:
+    # Safety net for the whole app, not just one endpoint: if any code path ever
+    # holds a session open too long again (e.g. a bug that runs a query then
+    # awaits slow network/file I/O before the next commit), Postgres itself
+    # kills that backend instead of quietly holding one of our 15 pooled
+    # connections "idle in transaction" forever and starving every other
+    # request. statement_timeout guards a single runaway query the same way.
     engine = create_engine(
         DATABASE_URL,
         echo=False,
@@ -23,7 +29,10 @@ if DATABASE_URL:
         pool_recycle=1800,
         pool_size=5,
         max_overflow=10,
-        connect_args={"connect_timeout": 5},
+        connect_args={
+            "connect_timeout": 5,
+            "options": "-c idle_in_transaction_session_timeout=60000 -c statement_timeout=120000",
+        },
     )
     DB_BACKEND = "postgresql"
 else:

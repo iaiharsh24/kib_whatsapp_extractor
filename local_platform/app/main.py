@@ -1673,9 +1673,21 @@ async def upload_txt(
         workspace_id=project.workspace_id,
         details={"workspace_name": ws_name, "project_name": project.name, "project_id": project.id},
     )
+    upload_id = upload.id  # capture now: commit() below expires ORM attributes,
+    # and re-reading them later would silently re-open a DB transaction.
     db.commit()
-    db.refresh(upload)
-    dest = os.path.join(UPLOAD_DIR, f"{upload.id}_{os.path.basename(saved_name)}")
+
+    # IMPORTANT: `file.read()` below waits on the client's network connection and
+    # can take anywhere from seconds to minutes for a large/slow upload. We must
+    # NOT hold a DB session/transaction open across that wait — a previous bug
+    # here called db.refresh(upload) before this loop, which silently started a
+    # new transaction that stayed checked out of the pool for the entire upload.
+    # With only pool_size=5 + max_overflow=10 (=15) connections, a handful of
+    # slow/concurrent uploads exhausted the pool and every other request
+    # (including the control center) started failing with a generic 500 until
+    # the API process was restarted. Do not add any `db.*` calls between here
+    # and the end of the `try` block below.
+    dest = os.path.join(UPLOAD_DIR, f"{upload_id}_{os.path.basename(saved_name)}")
     written = 0
     try:
         with open(dest, "wb") as handle:
@@ -1696,7 +1708,7 @@ async def upload_txt(
                 os.remove(dest)
         except OSError:
             pass
-        db.delete(upload)
+        db.query(Upload).filter(Upload.id == upload_id).delete()
         db.commit()
         raise
 
@@ -1707,7 +1719,7 @@ async def upload_txt(
                 os.remove(dest)
             except OSError:
                 pass
-            db.delete(upload)
+            db.query(Upload).filter(Upload.id == upload_id).delete()
             db.commit()
             raise HTTPException(
                 status_code=413,
@@ -1717,7 +1729,8 @@ async def upload_txt(
                 ),
             )
 
-    threading.Thread(target=process_upload, args=(upload.id, dest), daemon=True).start()
+    threading.Thread(target=process_upload, args=(upload_id, dest), daemon=True).start()
+    upload = db.query(Upload).filter(Upload.id == upload_id).first()
     return serialize_upload(upload, user.username)
 
 

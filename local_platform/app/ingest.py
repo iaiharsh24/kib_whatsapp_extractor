@@ -342,6 +342,11 @@ def hydrate_link_previews(upload_id: str | None = None, limit: int = 80) -> None
             url = primary_url(msg.raw_text, msg.extracted_url if str(msg.extracted_url or "").startswith("http") else None)
             if not url or not is_fetchable_url(url):
                 continue
+            # fetch_preview() makes a real HTTP request (up to ~8s) per message.
+            # Commit periodically instead of once at the end so this background
+            # thread never holds one DB connection idle-in-transaction for the
+            # full batch (up to `limit` sequential network calls) — that starves
+            # the pool for every other request the same way a stuck upload does.
             data = fetch_preview(url)
             data["fetched"] = True
             msg.link_preview = data
@@ -349,7 +354,9 @@ def hydrate_link_previews(upload_id: str | None = None, limit: int = 80) -> None
                 if msg.type in {"link", "reel", "chat"}:
                     msg.extracted_url = url
             count += 1
-        if count:
+            if count % 5 == 0:
+                db.commit()
+        if count % 5:
             db.commit()
     except Exception:
         db.rollback()
