@@ -33,6 +33,7 @@ export const LIBRARY_TABS = [
 export type LibraryTab = (typeof LIBRARY_TABS)[number]["id"];
 
 const PAGE_SIZE = 48;
+const EMPTY_UPLOADS: UploadRecord[] = [];
 
 function tabCount(summary: UploadLibrarySummary | null, tab: LibraryTab, total: number): number {
   if (!summary) return total;
@@ -181,7 +182,7 @@ export default function LibraryBrowser({
   embedded = false,
   onUpload,
   uploading = false,
-  uploads = [],
+  uploads = EMPTY_UPLOADS,
   draggable = false,
 }: {
   initialProjectId?: string | null;
@@ -192,6 +193,8 @@ export default function LibraryBrowser({
   draggable?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadsRef = useRef(uploads);
+  uploadsRef.current = uploads;
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [projectId, setProjectId] = useState<string | null>(initialProjectId);
   const [summaries, setSummaries] = useState<UploadLibrarySummary[]>([]);
@@ -231,7 +234,7 @@ export default function LibraryBrowser({
       .catch(() => undefined);
   }, [initialProjectId]);
 
-  const loadSummaries = useCallback(async () => {
+  const refreshSummaries = useCallback(async () => {
     if (!projectId) {
       setSummaries([]);
       return;
@@ -250,11 +253,12 @@ export default function LibraryBrowser({
         return;
       }
       setLoadError(err instanceof Error ? err.message : "Could not load zip summaries");
-      if (uploads.length) setSummaries(fallbackSummaries(uploads));
+      const fallback = uploadsRef.current;
+      if (fallback.length) setSummaries(fallbackSummaries(fallback));
     }
-  }, [projectId, uploads]);
+  }, [projectId]);
 
-  const loadLibrary = useCallback(
+  const loadLibraryPage = useCallback(
     async (nextOffset = 0, append = false) => {
       if (!projectId) {
         setLibrary([]);
@@ -291,16 +295,45 @@ export default function LibraryBrowser({
   );
 
   useEffect(() => {
-    void loadSummaries();
-  }, [loadSummaries]);
+    let cancelled = false;
+    if (!projectId) {
+      setSummaries([]);
+      return;
+    }
+    const cacheKey = `library-uploads:${projectId}`;
+    const stored = readCache<UploadLibrarySummary[]>(cacheKey);
+    if (stored?.length) setSummaries(stored);
+    void api<UploadLibrarySummary[]>(`/api/projects/${projectId}/library/uploads`)
+      .then((rows) => {
+        if (cancelled) return;
+        setSummaries(rows);
+        writeCache(cacheKey, rows);
+        setLoadError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (stored?.length) {
+          setLoadError("Showing last saved zip list — server is temporarily unavailable.");
+          return;
+        }
+        setLoadError(err instanceof Error ? err.message : "Could not load zip summaries");
+        const fallback = uploadsRef.current;
+        if (fallback.length) setSummaries(fallbackSummaries(fallback));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) return;
+    let cancelled = false;
     const cacheKey = `library-filters:${projectId}`;
     const stored = readCache<LibraryFilterOptions>(cacheKey);
     if (stored) setFilterOptions((current) => ({ ...current, ...stored }));
     void api<LibraryFilterOptions>(`/api/library/filters?project_id=${encodeURIComponent(projectId)}`)
       .then((data) => {
+        if (cancelled) return;
         writeCache(cacheKey, data);
         setFilterOptions((current) => ({
           ...current,
@@ -311,12 +344,51 @@ export default function LibraryBrowser({
         }));
       })
       .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [projectId]);
 
   useEffect(() => {
+    let cancelled = false;
     setOffset(0);
-    void loadLibrary(0, false);
-  }, [loadLibrary]);
+    if (!projectId) {
+      setLibrary([]);
+      setLibraryTotal(0);
+      return;
+    }
+    const listCacheKey = `library:${projectId}:${libTab}:${selectedUploadId || "all"}:0`;
+    const stored = readCache<LibraryResponse>(listCacheKey);
+    if (stored) {
+      setLibrary(stored.items);
+      setLibraryTotal(stored.total);
+    }
+    const params = libraryQuery(projectId, libTab, filters, {
+      uploadId: selectedUploadId,
+      limit: PAGE_SIZE,
+    });
+    params.set("offset", "0");
+    void api<LibraryResponse>(`/api/library?${params.toString()}`)
+      .then((lib) => {
+        if (cancelled) return;
+        setLibrary(lib.items);
+        setLibraryTotal(lib.total);
+        setOffset(lib.items.length);
+        writeCache(listCacheKey, lib);
+        setLoadError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (stored) {
+          setLoadError("Showing last saved library — server is temporarily unavailable.");
+          return;
+        }
+        setLoadError(err instanceof Error ? err.message : "Could not load library");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, libTab, filters, selectedUploadId]);
 
   useEffect(() => {
     function onTags(event: Event) {
@@ -335,8 +407,8 @@ export default function LibraryBrowser({
     if (!projectId) return;
     if (onUpload) {
       await onUpload(file);
-      await loadSummaries();
-      await loadLibrary(0, false);
+      await refreshSummaries();
+      await loadLibraryPage(0, false);
       return;
     }
     setLocalUploading(true);
@@ -347,8 +419,8 @@ export default function LibraryBrowser({
         method: "POST",
         body: form,
       });
-      await loadSummaries();
-      await loadLibrary(0, false);
+      await refreshSummaries();
+      await loadLibraryPage(0, false);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -360,7 +432,7 @@ export default function LibraryBrowser({
     if (loadingMore || library.length >= libraryTotal) return;
     setLoadingMore(true);
     try {
-      await loadLibrary(offset, true);
+      await loadLibraryPage(offset, true);
     } finally {
       setLoadingMore(false);
     }

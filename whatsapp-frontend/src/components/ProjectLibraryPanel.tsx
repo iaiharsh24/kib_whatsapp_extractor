@@ -182,6 +182,9 @@ export default function ProjectLibraryPanel({
 
   const selectedSummary = summaries.find((row) => row.upload.id === selectedUploadId) ?? null;
 
+  const uploadsRef = useRef(uploads);
+  uploadsRef.current = uploads;
+
   const loadSummaries = useCallback(async () => {
     const cacheKey = `library-uploads:${projectId}`;
     const stored = readCache<UploadLibrarySummary[]>(cacheKey);
@@ -197,9 +200,9 @@ export default function ProjectLibraryPanel({
         return;
       }
       setLoadError(err instanceof Error ? err.message : "Could not load zip summaries");
-      setSummaries((current) => (current.length ? current : fallbackSummaries(uploads)));
+      setSummaries((current) => (current.length ? current : fallbackSummaries(uploadsRef.current)));
     }
-  }, [projectId, uploads]);
+  }, [projectId]);
 
   const loadLibrary = useCallback(async () => {
     const cacheKey = `library:${projectId}:${libTab}:${selectedUploadId || "all"}`;
@@ -228,8 +231,30 @@ export default function ProjectLibraryPanel({
   }, [projectId, libTab, filters, selectedUploadId]);
 
   useEffect(() => {
-    void loadSummaries();
-  }, [loadSummaries, uploads]);
+    let cancelled = false;
+    const cacheKey = `library-uploads:${projectId}`;
+    const stored = readCache<UploadLibrarySummary[]>(cacheKey);
+    if (stored?.length) setSummaries(stored);
+    void api<UploadLibrarySummary[]>(`/api/projects/${projectId}/library/uploads`)
+      .then((rows) => {
+        if (cancelled) return;
+        setSummaries(rows);
+        writeCache(cacheKey, rows);
+        setLoadError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (stored?.length) {
+          setLoadError("Showing last saved zip list — server is temporarily unavailable.");
+          return;
+        }
+        setLoadError(err instanceof Error ? err.message : "Could not load zip summaries");
+        setSummaries((current) => (current.length ? current : fallbackSummaries(uploadsRef.current)));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     if (summaries.length === 0 && uploads.length > 0) {
@@ -339,9 +364,13 @@ export default function ProjectLibraryPanel({
               disabled={uploading}
               onChange={(event) => {
                 const file = event.target.files?.[0];
-                if (file) void onUpload(file).finally(() => {
-                  if (fileInputRef.current) fileInputRef.current.value = "";
-                });
+                if (file) {
+                  void onUpload(file)
+                    .then(() => Promise.all([loadSummaries(), loadLibrary()]))
+                    .finally(() => {
+                      if (fileInputRef.current) fileInputRef.current.value = "";
+                    });
+                }
               }}
             />
           </label>
