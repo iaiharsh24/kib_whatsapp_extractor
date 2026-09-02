@@ -463,9 +463,17 @@ def hydrate_canvas_nodes(nodes: list, messages: dict[str, dict]) -> list:
     return hydrated
 
 
-def serialize_canvas(canvas: ProjectCanvas | None) -> dict:
+def serialize_canvas(canvas: ProjectCanvas | None, updated_at: str | None = None) -> dict:
     if not canvas:
-        return {"id": None, "name": "Main canvas", "nodes": [], "edges": [], "frames": [], "viewport": None}
+        return {
+            "id": None,
+            "name": "Main canvas",
+            "nodes": [],
+            "edges": [],
+            "frames": [],
+            "viewport": None,
+            "updated_at": None,
+        }
     return {
         "id": canvas.id,
         "name": canvas.name or "Main canvas",
@@ -473,7 +481,25 @@ def serialize_canvas(canvas: ProjectCanvas | None) -> dict:
         "edges": canvas.edges or [],
         "frames": canvas.frames or [],
         "viewport": canvas.viewport if isinstance(canvas.viewport, dict) else None,
+        "updated_at": updated_at,
     }
+
+
+def canvas_updated_at(db: Session, canvas: ProjectCanvas | None) -> str | None:
+    """Latest edit time from version history (no schema change required)."""
+    if not canvas or not canvas.id:
+        return None
+    latest = (
+        db.query(CanvasVersion.created_at)
+        .filter(CanvasVersion.canvas_id == canvas.id)
+        .order_by(CanvasVersion.created_at.desc())
+        .first()
+    )
+    if latest and latest[0]:
+        return latest[0].isoformat()
+    if canvas.created_at:
+        return canvas.created_at.isoformat()
+    return None
 
 
 def serialize_canvas_summary(canvas: ProjectCanvas) -> dict:
@@ -2023,7 +2049,7 @@ async def get_project(
     uploaders = {item.id: item.username for item in db.query(User).all()}
     serialized_items = [serialize_message(item.message) for item in items if item.message]
     by_id = {item["id"]: item for item in serialized_items}
-    canvas_json = serialize_canvas(canvas)
+    canvas_json = serialize_canvas(canvas, updated_at=canvas_updated_at(db, canvas))
     missing_ids = []
     for node in canvas_json.get("nodes") or []:
         if not isinstance(node, dict):
@@ -2095,7 +2121,7 @@ async def save_canvas(
     save_canvas_version(db, canvas, canvas.nodes or [], canvas.edges or [], canvas.frames or [])
     db.commit()
     db.refresh(canvas)
-    return serialize_canvas(canvas)
+    return serialize_canvas(canvas, updated_at=canvas_updated_at(db, canvas))
 
 
 @app.get("/api/projects/{project_id}/canvas/history")
@@ -2192,7 +2218,7 @@ async def project_chat(
 ):
     project = require_project_access(project_id, user, db)
     canvas = db.query(ProjectCanvas).filter(ProjectCanvas.project_id == project_id).first()
-    canvas_json = serialize_canvas(canvas)
+    canvas_json = serialize_canvas(canvas, updated_at=canvas_updated_at(db, canvas) if canvas else None)
     items = (
         db.query(ProjectItem)
         .options(joinedload(ProjectItem.message))

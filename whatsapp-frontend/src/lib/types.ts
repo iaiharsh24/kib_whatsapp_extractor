@@ -188,6 +188,7 @@ export type CanvasState = {
   edges: unknown[];
   frames: unknown[];
   viewport?: { x: number; y: number; zoom: number } | null;
+  updated_at?: string | null;
 };
 
 export type CanvasHistoryEntry = {

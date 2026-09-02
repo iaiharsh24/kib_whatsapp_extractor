@@ -64,6 +64,10 @@ export function markCanvasDraftSaved(projectId: string, canvasId: string): void 
   writeCanvasDraft({ ...draft, dirty: false });
 }
 
+export function clearCanvasDraft(projectId: string, canvasId: string): void {
+  removeCache(`canvas:${projectId}:${canvasId}`);
+}
+
 export async function withRetry<T>(fn: () => Promise<T>, attempts = 3, delayMs = 800): Promise<T> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {

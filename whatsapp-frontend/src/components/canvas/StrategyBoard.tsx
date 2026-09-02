@@ -25,12 +25,13 @@ import {
 import "@xyflow/react/dist/style.css";
 import { api } from "@/lib/api";
 import { markCanvasDraftSaved, readCanvasDraft, withRetry, writeCanvasDraft } from "@/lib/cache";
-import type { CanvasHistoryEntry, MessageRecord, ProjectRecord } from "@/lib/types";
+import type { CanvasHistoryEntry, MessageRecord, ProjectDetail, ProjectRecord } from "@/lib/types";
 import { nodeTypes } from "./nodes";
 import Toolbar, { ZoomBar } from "./Toolbar";
 import SelectionBar from "./SelectionBar";
 import { BoardChrome, HelperLines } from "./BoardChrome";
 import { CanvasEditContext, type CanvasTool, type DrawMode, type ShapeKind } from "./CanvasContext";
+import { canvasFingerprint, hydrateNodesFromItems } from "./draft";
 import {
   absolutePosition,
   collectWithChildren,
@@ -56,6 +57,8 @@ import { TAGS_EVENT, saveMessageTags, uniqueTags, visibleTags } from "@/lib/tags
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import type { TagRecord } from "@/lib/types";
 
+type SaveState = "idle" | "saving" | "saved" | "error";
+
 type BoardProps = {
   projectId: string;
   canvasId?: string;
@@ -63,6 +66,7 @@ type BoardProps = {
   initialEdges: Edge[];
   initialFrames: Node[];
   initialViewport?: { x: number; y: number; zoom: number } | null;
+  initialUpdatedAt?: string | null;
   /** Fired after a dirty local draft is successfully written to the API. */
   onDraftSynced?: () => void;
 };
@@ -80,6 +84,7 @@ export default function StrategyBoard({
   initialEdges,
   initialFrames,
   initialViewport,
+  initialUpdatedAt = null,
   onDraftSynced,
 }: BoardProps) {
   const { screenToFlowPosition, fitView, getNodes, getEdges, setViewport, zoomIn, zoomOut, zoomTo } = useReactFlow();
@@ -95,6 +100,8 @@ export default function StrategyBoard({
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 });
   const [showMap, setShowMap] = useState(true);
   const [menu, setMenu] = useState<{ x: number; y: number; nodeId?: string } | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [guides, setGuides] = useState<Guides>({ x: null, y: null });
   const [search, setSearch] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
@@ -111,6 +118,10 @@ export default function StrategyBoard({
   const viewRef = useRef(view);
   viewRef.current = view;
   const viewportTimer = useRef<number | null>(null);
+  const savingRef = useRef(false);
+  const lastLocalEditAt = useRef(0);
+  const serverUpdatedAtRef = useRef<string | null>(initialUpdatedAt);
+  const applyingRemoteRef = useRef(false);
 
   const saveCanvas = useCallback(
     async (nextNodes: Node[], nextEdges: Edge[], viewport: { x: number; y: number; zoom: number }) => {
@@ -134,19 +145,33 @@ export default function StrategyBoard({
           dirty: true,
         });
       }
-      await withRetry(() =>
-        api(`/api/projects/${projectId}/canvas${canvasQuery(canvasId)}`, {
-          method: "PUT",
-          body: JSON.stringify(payload),
-        }),
-      );
-      if (canvasId) {
-        markCanvasDraftSaved(projectId, canvasId);
-        onDraftSynced?.();
+      savingRef.current = true;
+      setSaveState("saving");
+      setSaveError(null);
+      try {
+        const saved = await withRetry(() =>
+          api<{ updated_at?: string | null }>(`/api/projects/${projectId}/canvas${canvasQuery(canvasId)}`, {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          }),
+        );
+        if (saved?.updated_at) serverUpdatedAtRef.current = saved.updated_at;
+        if (canvasId) {
+          markCanvasDraftSaved(projectId, canvasId);
+          onDraftSynced?.();
+        }
+        setSaveState("saved");
+        window.setTimeout(() => setSaveState((current) => (current === "saved" ? "idle" : current)), 1800);
+        void api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history${canvasQuery(canvasId)}`)
+          .then(setHistory)
+          .catch(() => undefined);
+      } catch (err) {
+        setSaveState("error");
+        setSaveError(err instanceof Error ? err.message : "Save failed");
+        throw err;
+      } finally {
+        savingRef.current = false;
       }
-      void api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history${canvasQuery(canvasId)}`)
-        .then(setHistory)
-        .catch(() => undefined);
     },
     [projectId, canvasId, onDraftSynced],
   );
@@ -163,6 +188,8 @@ export default function StrategyBoard({
 
   const persist = useCallback(
     (nextNodes: Node[], nextEdges: Edge[]) => {
+      if (applyingRemoteRef.current) return;
+      lastLocalEditAt.current = Date.now();
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
         void saveCanvas(nextNodes, nextEdges, viewRef.current).catch(() => undefined);
@@ -181,6 +208,70 @@ export default function StrategyBoard({
     }
     persist(nodes, edges);
   }, [nodes, edges, persist, saveCanvas, canvasId, projectId]);
+
+  // Pull remote canvas updates while this tab is visible and the local board is clean.
+  useEffect(() => {
+    if (!canvasId) return;
+    let cancelled = false;
+
+    async function pollRemote() {
+      if (cancelled) return;
+      if (document.visibilityState !== "visible") return;
+      if (savingRef.current) return;
+      if (Date.now() - lastLocalEditAt.current < 2000) return;
+      if (canvasId && readCanvasDraft(projectId, canvasId)?.dirty) return;
+
+      try {
+        const remote = await api<ProjectDetail>(
+          `/api/projects/${projectId}${canvasQuery(canvasId)}`,
+        );
+        if (cancelled) return;
+        const remoteUpdated = remote.canvas?.updated_at || null;
+        const known = serverUpdatedAtRef.current;
+        if (remoteUpdated && known && remoteUpdated === known) return;
+        if (remoteUpdated && known) {
+          const remoteMs = Date.parse(remoteUpdated);
+          const knownMs = Date.parse(known);
+          if (Number.isFinite(remoteMs) && Number.isFinite(knownMs) && remoteMs <= knownMs) return;
+        }
+
+        const nextNodes = [
+          ...((remote.canvas.frames || []) as Node[]),
+          ...(hydrateNodesFromItems(remote.canvas.nodes || [], remote.items || []) as Node[]),
+        ].map(withResizeStyle);
+        const nextEdges = (remote.canvas.edges || []) as Edge[];
+        const localFingerprint = canvasFingerprint(getNodes(), getEdges());
+        const remoteFingerprint = canvasFingerprint(nextNodes, nextEdges);
+        if (localFingerprint === remoteFingerprint) {
+          if (remoteUpdated) serverUpdatedAtRef.current = remoteUpdated;
+          return;
+        }
+
+        applyingRemoteRef.current = true;
+        setNodes(nextNodes);
+        setEdges(nextEdges);
+        if (remoteUpdated) serverUpdatedAtRef.current = remoteUpdated;
+        window.setTimeout(() => {
+          applyingRemoteRef.current = false;
+        }, 300);
+      } catch {
+        // Keep local board if poll fails; offline banner is handled by the page.
+      }
+    }
+
+    const timer = window.setInterval(() => {
+      void pollRemote();
+    }, 4500);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void pollRemote();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [projectId, canvasId, getNodes, getEdges, setNodes, setEdges]);
 
   useEffect(() => {
     function flushDraft() {
@@ -1026,6 +1117,26 @@ export default function StrategyBoard({
           onUndo={undo}
           onRedo={redo}
         />
+        <div
+          className={`pointer-events-none absolute right-3 top-3 z-20 rounded-md px-2.5 py-1 text-[11px] font-medium shadow-sm ${
+            saveState === "error"
+              ? "bg-red-50 text-red-700 ring-1 ring-red-200"
+              : saveState === "saving"
+                ? "bg-sky-50 text-sky-800 ring-1 ring-sky-200"
+                : saveState === "saved"
+                  ? "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200"
+                  : "bg-white/90 text-zinc-500 ring-1 ring-zinc-200"
+          }`}
+          title={saveError || undefined}
+        >
+          {saveState === "saving"
+            ? "Saving…"
+            : saveState === "saved"
+              ? "Saved"
+              : saveState === "error"
+                ? "Save failed — retrying on next edit"
+                : "Autosave on"}
+        </div>
         <ZoomBar
           zoom={zoom}
           showMap={showMap}

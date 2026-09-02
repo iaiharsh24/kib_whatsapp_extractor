@@ -4,32 +4,14 @@ import { useCallback, useEffect, useState } from "react";
 import { ReactFlowProvider, type Edge, type Node } from "@xyflow/react";
 import { useParams } from "next/navigation";
 import { api } from "@/lib/api";
-import { readCache, readCanvasDraft, writeCache } from "@/lib/cache";
+import { readCache, writeCache } from "@/lib/cache";
 import StrategyBoard from "@/components/canvas/StrategyBoard";
+import { applyCanvasDraft } from "@/components/canvas/draft";
 import ProjectChat from "@/components/ProjectChat";
 import ProjectLibraryPanel from "@/components/ProjectLibraryPanel";
 import { getPreference, loadPreferences, savePreference } from "@/lib/preferences";
 import { loadWorkspaces, projectQuery } from "@/lib/workspace";
 import type { CanvasSummary, ProjectDetail, UploadRecord } from "@/lib/types";
-
-function applyCanvasDraft(project: ProjectDetail): { project: ProjectDetail; fromDraft: boolean } {
-  const canvasId = project.canvas_id;
-  const draft = canvasId ? readCanvasDraft(project.project.id, canvasId) : null;
-  if (!draft?.dirty) return { project, fromDraft: false };
-  return {
-    fromDraft: true,
-    project: {
-      ...project,
-      canvas: {
-        ...project.canvas,
-        nodes: draft.nodes,
-        edges: draft.edges,
-        frames: draft.frames,
-        viewport: draft.viewport,
-      },
-    },
-  };
-}
 
 export default function ProjectPage() {
   const params = useParams<{ id: string }>();
@@ -220,6 +202,7 @@ export default function ProjectPage() {
               initialEdges={initialEdges}
               initialFrames={initialFrames}
               initialViewport={initialViewport}
+              initialUpdatedAt={detail.canvas.updated_at || null}
               onDraftSynced={handleDraftSynced}
             />
           </ReactFlowProvider>
