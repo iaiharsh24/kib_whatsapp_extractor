@@ -1,6 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import { clearCanvasDraft, readCanvasDraft } from "@/lib/cache";
-import type { MessageRecord, ProjectDetail } from "@/lib/types";
+import type { LinkPreview, MessageRecord, ProjectDetail } from "@/lib/types";
 
 /** Refresh item-card fields from live messages while keeping draft layout. */
 export function hydrateNodesFromItems(nodes: unknown[], items: MessageRecord[]): unknown[] {
@@ -15,7 +15,7 @@ export function hydrateNodesFromItems(nodes: unknown[], items: MessageRecord[]):
       cloned.data = data;
       return cloned;
     }
-    const preview = message.link_preview || {};
+    const preview: LinkPreview = message.link_preview || { url: message.extracted_url || "" };
     data.url = message.extracted_url;
     data.previewImage = preview.image ?? null;
     data.previewTitle = preview.title ?? null;
