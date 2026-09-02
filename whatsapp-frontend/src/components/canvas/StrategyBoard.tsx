@@ -63,6 +63,8 @@ type BoardProps = {
   initialEdges: Edge[];
   initialFrames: Node[];
   initialViewport?: { x: number; y: number; zoom: number } | null;
+  /** Fired after a dirty local draft is successfully written to the API. */
+  onDraftSynced?: () => void;
 };
 
 type Snapshot = { nodes: Node[]; edges: Edge[] };
@@ -78,6 +80,7 @@ export default function StrategyBoard({
   initialEdges,
   initialFrames,
   initialViewport,
+  onDraftSynced,
 }: BoardProps) {
   const { screenToFlowPosition, fitView, getNodes, getEdges, setViewport, zoomIn, zoomOut, zoomTo } = useReactFlow();
   const [nodes, setNodes, onNodesChangeBase] = useNodesState(
@@ -137,12 +140,15 @@ export default function StrategyBoard({
           body: JSON.stringify(payload),
         }),
       );
-      if (canvasId) markCanvasDraftSaved(projectId, canvasId);
+      if (canvasId) {
+        markCanvasDraftSaved(projectId, canvasId);
+        onDraftSynced?.();
+      }
       void api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history${canvasQuery(canvasId)}`)
         .then(setHistory)
         .catch(() => undefined);
     },
-    [projectId, canvasId],
+    [projectId, canvasId, onDraftSynced],
   );
 
   const saveViewport = useCallback(

@@ -37,7 +37,10 @@ export default function ProjectPage() {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [activeCanvasId, setActiveCanvasId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [stale, setStale] = useState(false);
+  /** True only when the live API request failed and we fell back to cache. */
+  const [offline, setOffline] = useState(false);
+  /** True when a dirty browser draft is being / needs to be synced to the API. */
+  const [draftPending, setDraftPending] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [uploading, setUploading] = useState(false);
 
@@ -52,7 +55,8 @@ export default function ProjectPage() {
         const next = applyCanvasDraft(project);
         setDetail(next.project);
         setActiveCanvasId(next.project.canvas_id);
-        setStale(next.fromDraft);
+        setOffline(false);
+        setDraftPending(next.fromDraft);
         setError(null);
         return next.project;
       } catch (err) {
@@ -63,7 +67,8 @@ export default function ProjectPage() {
           const next = applyCanvasDraft(stored);
           setDetail(next.project);
           setActiveCanvasId(next.project.canvas_id);
-          setStale(true);
+          setOffline(true);
+          setDraftPending(next.fromDraft);
           setError(null);
           return next.project;
         }
@@ -134,6 +139,11 @@ export default function ProjectPage() {
     }
   }
 
+  const handleDraftSynced = useCallback(() => {
+    setDraftPending(false);
+    setOffline(false);
+  }, []);
+
   if (error && !detail) {
     return <div className="p-6 text-sm text-red-600">{error}</div>;
   }
@@ -173,10 +183,14 @@ export default function ProjectPage() {
         </button>
       </div>
 
-      {stale ? (
+      {offline ? (
         <p className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
           Showing last saved work on this device. The server was unavailable — your canvas draft is kept locally and will
           sync when the API is back.
+        </p>
+      ) : draftPending ? (
+        <p className="border-b border-sky-200 bg-sky-50 px-3 py-1.5 text-xs text-sky-900">
+          Syncing unsaved local canvas changes to the server…
         </p>
       ) : null}
 
@@ -206,6 +220,7 @@ export default function ProjectPage() {
               initialEdges={initialEdges}
               initialFrames={initialFrames}
               initialViewport={initialViewport}
+              onDraftSynced={handleDraftSynced}
             />
           </ReactFlowProvider>
         </div>
