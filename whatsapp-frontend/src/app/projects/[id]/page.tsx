@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ReactFlowProvider, type Edge, type Node } from "@xyflow/react";
 import { useParams } from "next/navigation";
 import { api } from "@/lib/api";
+import { readCache, readCanvasDraft, writeCache } from "@/lib/cache";
 import StrategyBoard from "@/components/canvas/StrategyBoard";
 import ProjectChat from "@/components/ProjectChat";
 import ProjectLibraryPanel from "@/components/ProjectLibraryPanel";
@@ -11,23 +12,63 @@ import { getPreference, loadPreferences, savePreference } from "@/lib/preference
 import { loadWorkspaces, projectQuery } from "@/lib/workspace";
 import type { CanvasSummary, ProjectDetail, UploadRecord } from "@/lib/types";
 
+function applyCanvasDraft(project: ProjectDetail): { project: ProjectDetail; fromDraft: boolean } {
+  const canvasId = project.canvas_id;
+  const draft = canvasId ? readCanvasDraft(project.project.id, canvasId) : null;
+  if (!draft?.dirty) return { project, fromDraft: false };
+  return {
+    fromDraft: true,
+    project: {
+      ...project,
+      canvas: {
+        ...project.canvas,
+        nodes: draft.nodes,
+        edges: draft.edges,
+        frames: draft.frames,
+        viewport: draft.viewport,
+      },
+    },
+  };
+}
+
 export default function ProjectPage() {
   const params = useParams<{ id: string }>();
   const projectId = params?.id ?? "";
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [activeCanvasId, setActiveCanvasId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [uploading, setUploading] = useState(false);
 
   const loadProject = useCallback(
     async (canvasId?: string | null) => {
-      const query = canvasId ? `?canvas_id=${encodeURIComponent(canvasId)}` : "";
-      const project = await api<ProjectDetail>(`/api/projects/${projectId}${query}`);
-      setDetail(project);
-      setActiveCanvasId(project.canvas_id);
-      setError(null);
-      return project;
+      const cacheKey = `project:${projectId}:${canvasId || "active"}`;
+      try {
+        const query = canvasId ? `?canvas_id=${encodeURIComponent(canvasId)}` : "";
+        const project = await api<ProjectDetail>(`/api/projects/${projectId}${query}`);
+        writeCache(`project:${projectId}:${project.canvas_id}`, project);
+        writeCache(`project:${projectId}:active`, project);
+        const next = applyCanvasDraft(project);
+        setDetail(next.project);
+        setActiveCanvasId(next.project.canvas_id);
+        setStale(next.fromDraft);
+        setError(null);
+        return next.project;
+      } catch (err) {
+        const stored =
+          readCache<ProjectDetail>(cacheKey) ||
+          readCache<ProjectDetail>(`project:${projectId}:active`);
+        if (stored) {
+          const next = applyCanvasDraft(stored);
+          setDetail(next.project);
+          setActiveCanvasId(next.project.canvas_id);
+          setStale(true);
+          setError(null);
+          return next.project;
+        }
+        throw err;
+      }
     },
     [projectId],
   );
@@ -93,7 +134,7 @@ export default function ProjectPage() {
     }
   }
 
-  if (error) {
+  if (error && !detail) {
     return <div className="p-6 text-sm text-red-600">{error}</div>;
   }
   if (!detail || !activeCanvasId) {
@@ -131,6 +172,13 @@ export default function ProjectPage() {
           + New canvas
         </button>
       </div>
+
+      {stale ? (
+        <p className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
+          Showing last saved work on this device. The server was unavailable — your canvas draft is kept locally and will
+          sync when the API is back.
+        </p>
+      ) : null}
 
       <div className="flex min-h-0 flex-1">
         <ProjectLibraryPanel

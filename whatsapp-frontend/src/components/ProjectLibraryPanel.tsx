@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, fileSrc, formatWhen } from "@/lib/api";
+import { readCache, writeCache } from "@/lib/cache";
 import LibraryFilters, {
   EMPTY_LIBRARY_FILTERS,
   libraryQuery,
@@ -165,17 +166,31 @@ export default function ProjectLibraryPanel({
   const selectedSummary = summaries.find((row) => row.upload.id === selectedUploadId) ?? null;
 
   const loadSummaries = useCallback(async () => {
+    const cacheKey = `library-uploads:${projectId}`;
+    const stored = readCache<UploadLibrarySummary[]>(cacheKey);
+    if (stored?.length) setSummaries(stored);
     try {
       const rows = await api<UploadLibrarySummary[]>(`/api/projects/${projectId}/library/uploads`);
       setSummaries(rows);
+      writeCache(cacheKey, rows);
       setLoadError(null);
     } catch (err) {
+      if (stored?.length) {
+        setLoadError("Showing last saved zip list — server is temporarily unavailable.");
+        return;
+      }
       setLoadError(err instanceof Error ? err.message : "Could not load zip summaries");
       setSummaries((current) => (current.length ? current : fallbackSummaries(uploads)));
     }
   }, [projectId, uploads]);
 
   const loadLibrary = useCallback(async () => {
+    const cacheKey = `library:${projectId}:${libTab}:${selectedUploadId || "all"}`;
+    const stored = readCache<LibraryResponse>(cacheKey);
+    if (stored) {
+      setLibrary(stored.items);
+      setLibraryTotal(stored.total);
+    }
     try {
       const params = libraryQuery(projectId, libTab, filters, {
         uploadId: selectedUploadId,
@@ -184,11 +199,14 @@ export default function ProjectLibraryPanel({
       const lib = await api<LibraryResponse>(`/api/library?${params.toString()}`);
       setLibrary(lib.items);
       setLibraryTotal(lib.total);
+      writeCache(cacheKey, lib);
       setLoadError(null);
     } catch (err) {
+      if (stored) {
+        setLoadError("Showing last saved library — server is temporarily unavailable.");
+        return;
+      }
       setLoadError(err instanceof Error ? err.message : "Could not load library");
-      setLibrary([]);
-      setLibraryTotal(0);
     }
   }, [projectId, libTab, filters, selectedUploadId]);
 
@@ -203,16 +221,28 @@ export default function ProjectLibraryPanel({
   }, [uploads, summaries.length]);
 
   useEffect(() => {
+    const cacheKey = `library-filters:${projectId}`;
+    const stored = readCache<LibraryFilterOptions>(cacheKey);
+    if (stored) {
+      setFilterOptions((current) => ({
+        ...current,
+        senders: stored.senders?.length ? stored.senders : current.senders,
+        chats: stored.chats?.length ? stored.chats : current.chats,
+        sites: stored.sites?.length ? stored.sites : current.sites,
+        tags: stored.tags?.length ? stored.tags : current.tags,
+      }));
+    }
     void api<LibraryFilterOptions>(`/api/library/filters?project_id=${encodeURIComponent(projectId)}`)
-      .then((data) =>
+      .then((data) => {
+        writeCache(cacheKey, data);
         setFilterOptions((current) => ({
           ...current,
           senders: data.senders,
           chats: data.chats,
           sites: data.sites,
           tags: data.tags?.length ? data.tags : current.tags,
-        })),
-      )
+        }));
+      })
       .catch(() => undefined);
   }, [projectId]);
 

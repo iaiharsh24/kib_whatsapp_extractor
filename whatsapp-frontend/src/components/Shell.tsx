@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { api, clearSession, getUser, refreshSessionUser } from "@/lib/api";
+import { readCache, writeCache } from "@/lib/cache";
 import { getPreference, loadPreferences, savePreference } from "@/lib/preferences";
 import {
   WORKSPACE_EVENT,
@@ -41,8 +42,15 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       setProjects([]);
       return;
     }
-    const rows = await api<ProjectRecord[]>(`/api/projects?${workspaceQuery()}`);
-    setProjects(rows);
+    const cacheKey = `projects:${workspaceId}`;
+    try {
+      const rows = await api<ProjectRecord[]>(`/api/projects?${workspaceQuery()}`);
+      setProjects(rows);
+      writeCache(cacheKey, rows);
+    } catch {
+      const stored = readCache<ProjectRecord[]>(cacheKey);
+      if (stored?.length) setProjects(stored);
+    }
   }, []);
 
   useEffect(() => {
@@ -58,8 +66,6 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         return loadProjects();
       })
       .catch((err) => {
-        setWorkspaces([]);
-        setProjects([]);
         showShellError(err instanceof Error ? err.message : "Failed to load workspaces");
       });
   }, [pathname, loadProjects]);

@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { readCache, writeCache } from "@/lib/cache";
 import { getPreference, loadPreferences, savePreference } from "@/lib/preferences";
 import type { WorkspaceRecord } from "@/lib/types";
 
@@ -7,15 +8,30 @@ export const WORKSPACE_EVENT = "wa-active-workspace";
 let cache: WorkspaceRecord[] | null = null;
 let activeId: string | null = null;
 
-export async function loadWorkspaces(): Promise<WorkspaceRecord[]> {
-  await loadPreferences();
-  const list = await api<WorkspaceRecord[]>("/api/workspaces");
-  cache = list;
+function rememberActive(list: WorkspaceRecord[]) {
   if (!activeId || !list.some((item) => item.id === activeId)) {
     const preferred = getPreference<string | null>("active_workspace_id", null);
     activeId = preferred && list.some((item) => item.id === preferred) ? preferred : list[0]?.id || null;
   }
-  return list;
+}
+
+export async function loadWorkspaces(): Promise<WorkspaceRecord[]> {
+  await loadPreferences();
+  try {
+    const list = await api<WorkspaceRecord[]>("/api/workspaces");
+    cache = list;
+    writeCache("workspaces", list);
+    rememberActive(list);
+    return list;
+  } catch (err) {
+    const stored = readCache<WorkspaceRecord[]>("workspaces") || [];
+    if (stored.length) {
+      cache = stored;
+      rememberActive(stored);
+      return stored;
+    }
+    throw err;
+  }
 }
 
 export function workspaceQuery(extra?: Record<string, string>): string {

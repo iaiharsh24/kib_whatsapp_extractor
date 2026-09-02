@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, formatWhen } from "@/lib/api";
+import { readCache, writeCache } from "@/lib/cache";
 import type { ControlTables } from "@/lib/types";
 
 type TableTab =
@@ -86,6 +87,7 @@ export default function ControlDataTables() {
           `/api/admin/control/tables?message_limit=${messageLimit}&message_offset=${messageOffset}`,
         );
         setTables(data);
+        writeCache(`control-tables:${messageOffset}`, data);
         setError(null);
         setLoading(false);
         return;
@@ -96,7 +98,13 @@ export default function ControlDataTables() {
         }
       }
     }
-    setError(lastError?.message || "Failed to load tables");
+    const stored = readCache<ControlTables>(`control-tables:${messageOffset}`);
+    if (stored) {
+      setTables(stored);
+      setError("Showing last saved tables — server is temporarily unavailable.");
+    } else {
+      setError(lastError?.message || "Failed to load tables");
+    }
     setLoading(false);
   }, [messageLimit, messageOffset]);
 
@@ -104,11 +112,13 @@ export default function ControlDataTables() {
     void load();
   }, [load]);
 
-  if (error) return <p className="text-sm text-red-600">{error}</p>;
-  if (loading || !tables) return <p className="text-sm text-zinc-500">Loading data tables…</p>;
+  if (loading && !tables) return <p className="text-sm text-zinc-500">Loading data tables…</p>;
+  if (error && !tables) return <p className="text-sm text-red-600">{error}</p>;
+  if (!tables) return <p className="text-sm text-zinc-500">Loading data tables…</p>;
 
   return (
     <div>
+      {error ? <p className="mb-3 text-sm text-amber-800">{error}</p> : null}
       <div className="flex flex-wrap gap-1 border-b border-zinc-200 pb-2">
         {TABS.map((item) => {
           let count = 0;

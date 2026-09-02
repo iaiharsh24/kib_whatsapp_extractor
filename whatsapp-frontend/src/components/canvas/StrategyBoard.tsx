@@ -23,6 +23,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api } from "@/lib/api";
+import { markCanvasDraftSaved, readCanvasDraft, withRetry, writeCanvasDraft } from "@/lib/cache";
 import type { CanvasHistoryEntry, MessageRecord, ProjectRecord } from "@/lib/types";
 import { nodeTypes } from "./nodes";
 import Toolbar, { ZoomBar } from "./Toolbar";
@@ -103,58 +104,103 @@ export default function StrategyBoard({
   viewRef.current = view;
   const viewportTimer = useRef<number | null>(null);
 
+  const saveCanvas = useCallback(
+    async (nextNodes: Node[], nextEdges: Edge[], viewport: { x: number; y: number; zoom: number }) => {
+      const frames = nextNodes.filter((node) => node.type === "frame");
+      const cards = nextNodes.filter((node) => node.type !== "frame");
+      const payload = {
+        nodes: cards.map(stripNode),
+        edges: nextEdges.map(stripEdge),
+        frames: frames.map(stripNode),
+        viewport,
+      };
+      if (canvasId) {
+        writeCanvasDraft({
+          projectId,
+          canvasId,
+          nodes: payload.nodes,
+          edges: payload.edges,
+          frames: payload.frames,
+          viewport,
+          updatedAt: Date.now(),
+          dirty: true,
+        });
+      }
+      await withRetry(() =>
+        api(`/api/projects/${projectId}/canvas${canvasQuery(canvasId)}`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        }),
+      );
+      if (canvasId) markCanvasDraftSaved(projectId, canvasId);
+      void api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history${canvasQuery(canvasId)}`)
+        .then(setHistory)
+        .catch(() => undefined);
+    },
+    [projectId, canvasId],
+  );
+
   const saveViewport = useCallback(
     (viewport: { x: number; y: number; zoom: number }) => {
       if (viewportTimer.current) window.clearTimeout(viewportTimer.current);
       viewportTimer.current = window.setTimeout(() => {
-        const allNodes = getNodes();
-        const frames = allNodes.filter((node) => node.type === "frame");
-        const cards = allNodes.filter((node) => node.type !== "frame");
-        void api(`/api/projects/${projectId}/canvas${canvasQuery(canvasId)}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            nodes: cards.map(stripNode),
-            edges: getEdges().map(stripEdge),
-            frames: frames.map(stripNode),
-            viewport,
-          }),
-        });
+        void saveCanvas(getNodes(), getEdges(), viewport).catch(() => undefined);
       }, 900);
     },
-    [getEdges, getNodes, projectId, canvasId],
+    [getEdges, getNodes, saveCanvas],
   );
 
   const persist = useCallback(
     (nextNodes: Node[], nextEdges: Edge[]) => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
-        const frames = nextNodes.filter((node) => node.type === "frame");
-        const cards = nextNodes.filter((node) => node.type !== "frame");
-        void api(`/api/projects/${projectId}/canvas${canvasQuery(canvasId)}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            nodes: cards.map(stripNode),
-            edges: nextEdges.map(stripEdge),
-            frames: frames.map(stripNode),
-            viewport: viewRef.current,
-          }),
-        }).then(() =>
-          api<CanvasHistoryEntry[]>(`/api/projects/${projectId}/canvas/history${canvasQuery(canvasId)}`)
-            .then(setHistory)
-            .catch(() => undefined),
-        );
+        void saveCanvas(nextNodes, nextEdges, viewRef.current).catch(() => undefined);
       }, 700);
     },
-    [projectId, canvasId],
+    [saveCanvas],
   );
 
   useEffect(() => {
     if (skipFirstSave.current) {
       skipFirstSave.current = false;
+      if (canvasId && readCanvasDraft(projectId, canvasId)?.dirty) {
+        void saveCanvas(nodes, edges, viewRef.current).catch(() => undefined);
+      }
       return;
     }
     persist(nodes, edges);
-  }, [nodes, edges, persist]);
+  }, [nodes, edges, persist, saveCanvas, canvasId, projectId]);
+
+  useEffect(() => {
+    function flushDraft() {
+      if (!canvasId) return;
+      const pending = Boolean(saveTimer.current || viewportTimer.current);
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (!pending) return;
+      const allNodes = getNodes();
+      const frames = allNodes.filter((node) => node.type === "frame");
+      const cards = allNodes.filter((node) => node.type !== "frame");
+      writeCanvasDraft({
+        projectId,
+        canvasId,
+        nodes: cards.map(stripNode),
+        edges: getEdges().map(stripEdge),
+        frames: frames.map(stripNode),
+        viewport: viewRef.current,
+        updatedAt: Date.now(),
+        dirty: true,
+      });
+    }
+    window.addEventListener("pagehide", flushDraft);
+    window.addEventListener("beforeunload", flushDraft);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      window.removeEventListener("beforeunload", flushDraft);
+    };
+  }, [canvasId, getEdges, getNodes, projectId]);
 
   useEffect(() => {
     const workspaceId = getActiveWorkspaceId();

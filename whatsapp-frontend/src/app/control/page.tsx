@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import ControlDataTables from "@/components/ControlDataTables";
 import { api, downloadAuthenticated, formatWhen, getUser } from "@/lib/api";
+import { readCache, writeCache } from "@/lib/cache";
 import { refreshWorkspaces, setActiveWorkspaceId } from "@/lib/workspace";
 import type {
   BackupStatus,
@@ -239,28 +240,65 @@ export default function ControlPage() {
     ]);
     const labels = ["overview", "database summary", "snapshots", "backup status"];
     const failures: string[] = [];
+    let usedCache = false;
     const [overviewRes, dbRes, snapshotsRes, backupsRes] = results;
 
-    if (overviewRes.status === "fulfilled") setControl(overviewRes.value);
-    else failures.push(labels[0]);
+    if (overviewRes.status === "fulfilled") {
+      setControl(overviewRes.value);
+      writeCache("control-overview", overviewRes.value);
+    } else {
+      const stored = readCache<ControlOverview>("control-overview");
+      if (stored) {
+        setControl(stored);
+        usedCache = true;
+      } else failures.push(labels[0]);
+    }
 
-    if (dbRes.status === "fulfilled") setDbOverview(dbRes.value);
-    else failures.push(labels[1]);
+    if (dbRes.status === "fulfilled") {
+      setDbOverview(dbRes.value);
+      writeCache("control-db-overview", dbRes.value);
+    } else {
+      const stored = readCache<DbOverview>("control-db-overview");
+      if (stored) {
+        setDbOverview(stored);
+        usedCache = true;
+      } else failures.push(labels[1]);
+    }
 
     if (snapshotsRes.status === "fulfilled") {
       setSnapshots(snapshotsRes.value.items);
       setSnapshotTotal(snapshotsRes.value.total);
-    } else failures.push(labels[2]);
+      writeCache("control-snapshots", snapshotsRes.value);
+    } else {
+      const stored = readCache<DbSnapshotResponse>("control-snapshots");
+      if (stored) {
+        setSnapshots(stored.items);
+        setSnapshotTotal(stored.total);
+        usedCache = true;
+      } else failures.push(labels[2]);
+    }
 
-    if (backupsRes.status === "fulfilled") setBackups(backupsRes.value);
-    else failures.push(labels[3]);
+    if (backupsRes.status === "fulfilled") {
+      setBackups(backupsRes.value);
+      writeCache("control-backups", backupsRes.value);
+    } else {
+      const stored = readCache<BackupStatus>("control-backups");
+      if (stored) {
+        setBackups(stored);
+        usedCache = true;
+      } else failures.push(labels[3]);
+    }
 
     if (failures.length === results.length) {
       const first = results.find((item) => item.status === "rejected") as PromiseRejectedResult | undefined;
       throw first?.reason instanceof Error ? first.reason : new Error("Failed to load control center");
     }
-    if (failures.length) {
-      setLoadWarning(`Some sections could not load (${failures.join(", ")}). Data is still in the database — try Refresh.`);
+    if (failures.length || usedCache) {
+      setLoadWarning(
+        usedCache
+          ? "Showing last saved control-center data from this browser. Refresh once the server is back."
+          : `Some sections could not load (${failures.join(", ")}). Data is still in the database — try Refresh.`,
+      );
     }
   }
 

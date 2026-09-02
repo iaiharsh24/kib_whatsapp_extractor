@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, formatWhen } from "@/lib/api";
+import { readCache, writeCache } from "@/lib/cache";
 import { WORKSPACE_EVENT, getActiveWorkspace, getActiveWorkspaceId, loadWorkspaces, workspaceQuery } from "@/lib/workspace";
 import type { ProjectRecord } from "@/lib/types";
 
@@ -19,8 +20,21 @@ export default function ProjectsHomePage() {
       return;
     }
     setWorkspaceName(getActiveWorkspace()?.name || "Workspace");
-    const rows = await api<ProjectRecord[]>(`/api/projects?${workspaceQuery()}`);
-    setProjects(rows);
+    const cacheKey = `projects:${workspaceId}`;
+    try {
+      const rows = await api<ProjectRecord[]>(`/api/projects?${workspaceQuery()}`);
+      setProjects(rows);
+      writeCache(cacheKey, rows);
+      setError(null);
+    } catch (err) {
+      const stored = readCache<ProjectRecord[]>(cacheKey);
+      if (stored?.length) {
+        setProjects(stored);
+        setError("Showing last saved projects — server is temporarily unavailable.");
+        return;
+      }
+      throw err;
+    }
   }, []);
 
   useEffect(() => {

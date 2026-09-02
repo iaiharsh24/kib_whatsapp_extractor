@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from sqlalchemy import String, and_, func, or_
+from sqlalchemy import String, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 import logging
@@ -288,19 +288,6 @@ def serialize_message(message: Message) -> dict:
         "link_preview": preview,
         "urls": (preview or {}).get("urls") or [],
     }
-
-
-def external_link_filter():
-    return and_(
-        Message.type != "reel",
-        or_(
-            Message.type == "link",
-            Message.extracted_url.ilike("http%"),
-            Message.raw_text.ilike("%http://%"),
-            Message.raw_text.ilike("%https://%"),
-            Message.raw_text.ilike("%www.%"),
-        ),
-    )
 
 
 def serialize_upload(upload: Upload, username: str | None = None) -> dict:
@@ -1392,7 +1379,7 @@ async def library(
         "reel": ["reel"],
     }
     if tab in {"link", "links"}:
-        query = query.filter(external_link_filter())
+        query = query.filter(Message.type == "link")
     elif tab != "all" and tab in tab_types:
         query = query.filter(Message.type.in_(tab_types[tab]))
     if sender:
@@ -1441,15 +1428,9 @@ async def library(
         .all()
     )
     by_type = {row[0]: row[1] for row in type_rows if row[0]}
-    link_count = (
-        db.query(Message)
-        .filter(Message.project_id == project_id)
-        .filter(external_link_filter())
-        .count()
-    )
     counts = {
         "chat": by_type.get("chat", 0),
-        "link": link_count,
+        "link": by_type.get("link", 0),
         "document": by_type.get("document", 0),
         "image": by_type.get("image", 0) + by_type.get("media_omitted", 0),
         "reel": by_type.get("reel", 0),
